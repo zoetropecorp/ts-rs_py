@@ -6,7 +6,7 @@
 ts-rs
 </h1>
 <p align="center">
-Generate typescript type declarations from rust types
+Generate TypeScript and Python type declarations from Rust types
 </p>
 
 <div align="center">
@@ -27,15 +27,18 @@ alt="Download" />
 </div>
 
 ### Why?
-When building a web application in rust, data structures have to be shared between backend and frontend.
-Using this library, you can easily generate TypeScript bindings to your rust structs & enums so that you can keep your
+When building applications in Rust that interact with TypeScript or Python frontends, data structures have to be shared between backend and frontend.
+Using this library, you can easily generate TypeScript and Python bindings to your Rust structs & enums so that you can keep your
 types in one place.
 
-ts-rs might also come in handy when working with webassembly.
+ts-rs might also come in handy when working with WebAssembly or Python integrations.
 
 ### How?
-ts-rs exposes a single trait, `TS`. Using a derive macro, you can implement this interface for your types.
-Then, you can use this trait to obtain the TypeScript bindings.
+ts-rs exposes two main traits:
+1. `TS`: Using the `TS` derive macro, you can generate TypeScript bindings for your Rust types.
+2. `Py`: Using the `Py` derive macro, you can generate Python bindings for your Rust types.
+
+You can use these traits to obtain the TypeScript or Python bindings for your types.
 We recommend doing this in your tests.
 [See the example](https://github.com/Aleph-Alpha/ts-rs/blob/main/example/src/lib.rs) and [the docs](https://docs.rs/ts-rs/latest/ts_rs/).
 
@@ -46,8 +49,9 @@ ts-rs = "10.1"
 ```
 
 ```rust
-use ts_rs::TS;
+use ts_rs::{TS, Py};
 
+// Generate TypeScript binding
 #[derive(TS)]
 #[ts(export)]
 struct User {
@@ -55,24 +59,92 @@ struct User {
     first_name: String,
     last_name: String,
 }
+
+// Or generate both TypeScript and Python bindings
+#[derive(TS, Py)]
+#[ts(export)]
+#[py(export)]
+struct Profile {
+    profile_id: i32,
+    username: String,
+    active: bool,
+}
 ```
 
-When running `cargo test` or `cargo test export_bindings`, the TypeScript bindings will be exported to the file `bindings/User.ts`
-and will contain the following code:
+When running `cargo test`:
+1. The TypeScript bindings will be exported to `bindings/User.ts` and `bindings/Profile.ts` with content like:
 
 ```ts
 export type User = { user_id: number, first_name: string, last_name: string, };
 ```
 
+2. The Python bindings will be exported to `py_bindings/` directory with files like:
+
+```python
+# Profile.py
+from typing import Any, Optional, List, Dict, Union
+
+class Profile:
+    profile_id: int
+    username: str
+    active: bool
+
+    def __init__(self, profile_id: int, username: str, active: bool) -> None:
+        self.profile_id = profile_id
+        self.username = username
+        self.active = active
+
+# Status.py
+from enum import Enum, auto
+from typing import Any, Optional, List, Dict, Union
+from dataclasses import dataclass
+
+class Status(Enum):
+    Active = 1
+    Inactive = 2
+    Pending = 3
+
+# Message.py - Complex enum with fields
+from enum import Enum, auto
+from typing import Any, Optional, List, Dict, Union
+from dataclasses import dataclass
+
+@dataclass
+class Message_Text:
+    content: str
+    sender: str
+
+@dataclass
+class Message_Image:
+    url: str
+    width: int
+    height: int
+
+@dataclass
+class Message_File:
+    field_0: str
+
+class Message(Enum):
+    Text = Message_Text
+    Image = Message_Image
+    File = Message_File
+
+    @classmethod
+    def create_message(cls, variant_name: str, **kwargs):
+        """Helper to create a variant instance with fields"""
+        # Implementation details...
+```
+
 ### Features
-- generate type declarations from rust structs
-- generate union declarations from rust enums
-- inline types
-- flatten structs/types
-- generate necessary imports when exporting to multiple files
-- serde compatibility
-- generic types
-- support for ESM imports
+- Generate type declarations from Rust structs for both TypeScript and Python
+- Generate union declarations from Rust enums
+- Inline types
+- Flatten structs/types
+- Generate necessary imports when exporting to multiple files
+- Serde compatibility
+- Generic types
+- Support for ESM imports (TypeScript)
+- Python class and Enum support
 
 ### cargo features
 | **Feature**        | **Description**                                                                                                                                                                                           |

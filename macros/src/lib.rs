@@ -17,6 +17,7 @@ use crate::{deps::Dependencies, utils::format_generics};
 mod utils;
 mod attr;
 mod deps;
+mod py_macro;
 mod types;
 
 struct DerivedTS {
@@ -432,6 +433,17 @@ fn used_type_params<'ty, 'out>(
 #[proc_macro_derive(TS, attributes(ts))]
 pub fn typescript(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     match entry(input) {
+        Err(err) => err.to_compile_error(),
+        Ok(result) => result,
+    }
+    .into()
+}
+
+/// Derives [Py](./trait.Py.html) for a struct or enum.
+/// Please take a look at [Py](./trait.Py.html) for documentation.
+#[proc_macro_derive(Py, attributes(py))]
+pub fn python(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    match py_macro::py_entry(input) {
         Err(err) => err.to_compile_error(),
         Ok(result) => result,
     }

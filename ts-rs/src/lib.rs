@@ -136,17 +136,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub use ts_rs_macros::TS;
+pub use ts_rs_macros::{Py, TS};
 
 pub use crate::export::ExportError;
 
 #[cfg(feature = "chrono-impl")]
 mod chrono;
 mod export;
+pub mod py;
 #[cfg(feature = "serde-json-impl")]
 mod serde_json;
 #[cfg(feature = "tokio-impl")]
 mod tokio;
+
+pub use py::{Py, PyTypeVisitor};
 
 /// A type which can be represented in TypeScript.  
 /// Most of the time, you'd want to derive this trait instead of implementing it manually.  
