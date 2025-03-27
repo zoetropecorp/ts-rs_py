@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from MoveDest import MoveDest
     from MoveDest_Entity import MoveDest_Entity
     from MoveDest_Position import MoveDest_Position
-    from Path( import Path(
     from Position import Position
     from TYPE import TYPE
     from uuid import UUID as Uuid
@@ -51,43 +50,9 @@ class MoveDest_Entity:
 @dataclass
 class MoveDest_Entity:
     entity_id: Uuid
-    def toJSON(self) -> str: 
-    def _serialize(obj): 
-    if hasattr(obj, '__dict__'): 
-    for key, value in obj.__dict__.items(): 
-    elif isinstance(obj, list): 
-    elif isinstance(obj, dict): 
-    return {k: _serialize(v) for k, v in obj.items()}
-    elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')): 
-    elif hasattr(obj, 'value') and isinstance(obj, Enum): 
-    elif isinstance(obj, Enum): 
-    def fromJSON(cls, json_str): 
-    def fromDict(cls, data): 
-    if 'entity_id' in data: 
-    if isinstance(entity_id, dict) and hasattr(cls, '_entity_id_type'): 
-    elif isinstance(entity_id, list) and hasattr(cls, '_item_type'): 
-    if hasattr(item_type, 'fromDict'): 
-    else: 
 
-    def __init__(self, entity_id, def toJSON(self) -> str, def _serialize(obj), if hasattr(obj, '__dict__'), for key, value in obj.__dict__.items(), elif isinstance(obj, list), elif isinstance(obj, dict), return {k, elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')), elif hasattr(obj, 'value') and isinstance(obj, Enum), elif isinstance(obj, Enum), def fromJSON(cls, json_str), def fromDict(cls, data), if 'entity_id' in data, if isinstance(entity_id, dict) and hasattr(cls, '_entity_id_type'), elif isinstance(entity_id, list) and hasattr(cls, '_item_type'), if hasattr(item_type, 'fromDict'), else):
+    def __init__(self, entity_id):
         self.entity_id = entity_id
-        self.def toJSON(self) -> str = def toJSON(self) -> str
-        self.def _serialize(obj) = def _serialize(obj)
-        self.if hasattr(obj, '__dict__') = if hasattr(obj, '__dict__')
-        self.for key, value in obj.__dict__.items() = for key, value in obj.__dict__.items()
-        self.elif isinstance(obj, list) = elif isinstance(obj, list)
-        self.elif isinstance(obj, dict) = elif isinstance(obj, dict)
-        self.return {k = return {k
-        self.elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')) = elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON'))
-        self.elif hasattr(obj, 'value') and isinstance(obj, Enum) = elif hasattr(obj, 'value') and isinstance(obj, Enum)
-        self.elif isinstance(obj, Enum) = elif isinstance(obj, Enum)
-        self.def fromJSON(cls, json_str) = def fromJSON(cls, json_str)
-        self.def fromDict(cls, data) = def fromDict(cls, data)
-        self.if 'entity_id' in data = if 'entity_id' in data
-        self.if isinstance(entity_id, dict) and hasattr(cls, '_entity_id_type') = if isinstance(entity_id, dict) and hasattr(cls, '_entity_id_type')
-        self.elif isinstance(entity_id, list) and hasattr(cls, '_item_type') = elif isinstance(entity_id, list) and hasattr(cls, '_item_type')
-        self.if hasattr(item_type, 'fromDict') = if hasattr(item_type, 'fromDict')
-        self.else = else
 
     def toJSON(self) -> str:
         """Serialize this object to a JSON string"""
@@ -129,61 +94,15 @@ class MoveDest_Entity:
                 entity_id = Uuid[entity_id]
             except (KeyError, ValueError):
                 pass  # Leave as string if not a valid enum value
-        def toJSON(self) -> str = data.get('def toJSON(self) -> str', None)
-        def _serialize(obj) = data.get('def _serialize(obj)', None)
-        if hasattr(obj, '__dict__') = data.get('if hasattr(obj, '__dict__')', None)
-        for key, value in obj.__dict__.items() = data.get('for key, value in obj.__dict__.items()', None)
-        elif isinstance(obj, list) = data.get('elif isinstance(obj, list)', None)
-        elif isinstance(obj, dict) = data.get('elif isinstance(obj, dict)', None)
-        return {k = data.get('return {k', None)
-        elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')) = data.get('elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON'))', None)
-        elif hasattr(obj, 'value') and isinstance(obj, Enum) = data.get('elif hasattr(obj, 'value') and isinstance(obj, Enum)', None)
-        elif isinstance(obj, Enum) = data.get('elif isinstance(obj, Enum)', None)
-        def fromJSON(cls, json_str) = data.get('def fromJSON(cls, json_str)', None)
-        def fromDict(cls, data) = data.get('def fromDict(cls, data)', None)
-        if 'entity_id' in data = data.get('if 'entity_id' in data', None)
-        if isinstance(entity_id, dict) and hasattr(cls, '_entity_id_type') = data.get('if isinstance(entity_id, dict) and hasattr(cls, '_entity_id_type')', None)
-        elif isinstance(entity_id, list) and hasattr(cls, '_item_type') = data.get('elif isinstance(entity_id, list) and hasattr(cls, '_item_type')', None)
-        if hasattr(item_type, 'fromDict') = data.get('if hasattr(item_type, 'fromDict')', None)
-        else = data.get('else', None)
-        return cls(entity_id, def toJSON(self) -> str, def _serialize(obj), if hasattr(obj, '__dict__'), for key, value in obj.__dict__.items(), elif isinstance(obj, list), elif isinstance(obj, dict), return {k, elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')), elif hasattr(obj, 'value') and isinstance(obj, Enum), elif isinstance(obj, Enum), def fromJSON(cls, json_str), def fromDict(cls, data), if 'entity_id' in data, if isinstance(entity_id, dict) and hasattr(cls, '_entity_id_type'), elif isinstance(entity_id, list) and hasattr(cls, '_item_type'), if hasattr(item_type, 'fromDict'), else)
+        # Filter out method definitions and only pass actual field values
+        return cls(entity_id)
 
 @dataclass
 class MoveDest_Position:
     field_0: Position
-    def toJSON(self) -> str: 
-    def _serialize(obj): 
-    if hasattr(obj, '__dict__'): 
-    for key, value in obj.__dict__.items(): 
-    elif isinstance(obj, list): 
-    elif isinstance(obj, dict): 
-    return {k: _serialize(v) for k, v in obj.items()}
-    elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')): 
-    elif hasattr(obj, 'value') and isinstance(obj, Enum): 
-    elif isinstance(obj, Enum): 
-    def fromJSON(cls, json_str): 
-    def fromDict(cls, data): 
-    if isinstance(data, list): 
-    return cls(*data[: 1])
-    else: 
 
-    def __init__(self, field_0, def toJSON(self) -> str, def _serialize(obj), if hasattr(obj, '__dict__'), for key, value in obj.__dict__.items(), elif isinstance(obj, list), elif isinstance(obj, dict), return {k, elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')), elif hasattr(obj, 'value') and isinstance(obj, Enum), elif isinstance(obj, Enum), def fromJSON(cls, json_str), def fromDict(cls, data), if isinstance(data, list), return cls(*data[, else):
+    def __init__(self, field_0):
         self.field_0 = field_0
-        self.def toJSON(self) -> str = def toJSON(self) -> str
-        self.def _serialize(obj) = def _serialize(obj)
-        self.if hasattr(obj, '__dict__') = if hasattr(obj, '__dict__')
-        self.for key, value in obj.__dict__.items() = for key, value in obj.__dict__.items()
-        self.elif isinstance(obj, list) = elif isinstance(obj, list)
-        self.elif isinstance(obj, dict) = elif isinstance(obj, dict)
-        self.return {k = return {k
-        self.elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')) = elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON'))
-        self.elif hasattr(obj, 'value') and isinstance(obj, Enum) = elif hasattr(obj, 'value') and isinstance(obj, Enum)
-        self.elif isinstance(obj, Enum) = elif isinstance(obj, Enum)
-        self.def fromJSON(cls, json_str) = def fromJSON(cls, json_str)
-        self.def fromDict(cls, data) = def fromDict(cls, data)
-        self.if isinstance(data, list) = if isinstance(data, list)
-        self.return cls(*data[ = return cls(*data[
-        self.else = else
 
     def toJSON(self) -> str:
         """Serialize this object to a JSON string"""
@@ -225,22 +144,8 @@ class MoveDest_Position:
                 field_0 = Position[field_0]
             except (KeyError, ValueError):
                 pass  # Leave as string if not a valid enum value
-        def toJSON(self) -> str = data.get('def toJSON(self) -> str', None)
-        def _serialize(obj) = data.get('def _serialize(obj)', None)
-        if hasattr(obj, '__dict__') = data.get('if hasattr(obj, '__dict__')', None)
-        for key, value in obj.__dict__.items() = data.get('for key, value in obj.__dict__.items()', None)
-        elif isinstance(obj, list) = data.get('elif isinstance(obj, list)', None)
-        elif isinstance(obj, dict) = data.get('elif isinstance(obj, dict)', None)
-        return {k = data.get('return {k', None)
-        elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')) = data.get('elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON'))', None)
-        elif hasattr(obj, 'value') and isinstance(obj, Enum) = data.get('elif hasattr(obj, 'value') and isinstance(obj, Enum)', None)
-        elif isinstance(obj, Enum) = data.get('elif isinstance(obj, Enum)', None)
-        def fromJSON(cls, json_str) = data.get('def fromJSON(cls, json_str)', None)
-        def fromDict(cls, data) = data.get('def fromDict(cls, data)', None)
-        if isinstance(data, list) = data.get('if isinstance(data, list)', None)
-        return cls(*data[ = data.get('return cls(*data[', None)
-        else = data.get('else', None)
-        return cls(field_0, def toJSON(self) -> str, def _serialize(obj), if hasattr(obj, '__dict__'), for key, value in obj.__dict__.items(), elif isinstance(obj, list), elif isinstance(obj, dict), return {k, elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')), elif hasattr(obj, 'value') and isinstance(obj, Enum), elif isinstance(obj, Enum), def fromJSON(cls, json_str), def fromDict(cls, data), if isinstance(data, list), return cls(*data[, else)
+        # Filter out method definitions and only pass actual field values
+        return cls(field_0)
 
 # The main MoveDest class
 class MoveDest(Enum):
@@ -344,19 +249,9 @@ class MoveDest(Enum):
                         return MoveDest_Position.fromDict(kwargs)
                     except Exception:
                         return variant  # Fallback to simple variant
-                if variant.name == "if variant.name.lower()":
-                    try:
-                        return MoveDest_if variant.name.lower().fromDict(kwargs)
-                    except Exception:
-                        return variant  # Fallback to simple variant
                 if variant.name == "inner_data":
                     try:
                         return MoveDest_inner_data.fromDict(kwargs)
-                    except Exception:
-                        return variant  # Fallback to simple variant
-                if variant.name == "inner_data["type"]":
-                    try:
-                        return MoveDest_inner_data["type"].fromDict(kwargs)
                     except Exception:
                         return variant  # Fallback to simple variant
                 if variant.name == "data":

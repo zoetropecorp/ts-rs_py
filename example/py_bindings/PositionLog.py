@@ -16,7 +16,6 @@ if str(_current_dir) not in sys.path:
 # Forward references for type checking only
 if TYPE_CHECKING:
     from Orientation import Orientation
-    from Path( import Path(
     from Position import Position
     from TYPE import TYPE
     from uuid import UUID as Uuid

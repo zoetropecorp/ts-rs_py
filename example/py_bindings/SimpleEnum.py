@@ -15,7 +15,6 @@ if str(_current_dir) not in sys.path:
 
 # Forward references for type checking only
 if TYPE_CHECKING:
-    from Path( import Path(
     from TYPE import TYPE
 
 class SimpleEnum(Enum):

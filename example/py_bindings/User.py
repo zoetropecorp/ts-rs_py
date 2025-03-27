@@ -16,7 +16,6 @@ if str(_current_dir) not in sys.path:
 # Forward references for type checking only
 if TYPE_CHECKING:
     from Gender import Gender
-    from Path( import Path(
     from Role import Role
     from TYPE import TYPE
     from User import User

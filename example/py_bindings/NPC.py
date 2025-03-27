@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from DialogueNode import DialogueNode
     from NPCGameData import NPCGameData
     from Orientation import Orientation
-    from Path( import Path(
     from Position import Position
     from TYPE import TYPE
     from uuid import UUID as Uuid
