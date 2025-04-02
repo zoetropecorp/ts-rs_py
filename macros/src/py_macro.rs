@@ -921,7 +921,8 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
             .filter(|v| {
                 // Filter out variants with invalid Python names
                 let variant_name = v.ident.to_string();
-                !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name)
+                println!("variant_name: {}", variant_name);
+                !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name) && !variant_name.contains("TypedDict")
             })
             .map(|v| {
                 let variant_name = v.ident.to_string();
@@ -1009,7 +1010,7 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
             .filter(|(_, v)| {
                 let variant_name = v.ident.to_string();
                 // Make sure the variant name is a valid Python identifier
-                !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name)
+                !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name) && !variant_name.contains("TypedDict")
             })
             .map(|(i, v)| {
                 format!("    {} = {}", v.ident, i + 1)

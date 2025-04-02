@@ -71,14 +71,14 @@ fn test_py_generation() {
     // Add assertions for complex enum
     assert!(message_code.contains("from dataclasses import dataclass"));
     assert!(message_code.contains("@dataclass"));
-    assert!(message_code.contains("class Message_Text:"));
+    assert!(message_code.contains("class Message_Text(TypedDict):"));
     assert!(message_code.contains("content: str"));
     assert!(message_code.contains("sender: str"));
-    assert!(message_code.contains("class Message_Image:"));
+    assert!(message_code.contains("class Message_Image(TypedDict):"));
     assert!(message_code.contains("url: str"));
     assert!(message_code.contains("width: int"));
     assert!(message_code.contains("height: int"));
-    assert!(message_code.contains("class Message_File:"));
+    assert!(message_code.contains("class Message_File(TypedDict):"));
     assert!(message_code.contains("field_0: str"));
     assert!(message_code.contains("class Message(Enum):"));
     assert!(message_code.contains("def create_message(cls, variant_name: str, **kwargs):"));

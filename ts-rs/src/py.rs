@@ -1243,13 +1243,16 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         buffer.push_str(&format!("# The main {} class\n", enum_name));
         buffer.push_str(&format!("class {}(Enum):\n", enum_name));
         
-        // Add variant declarations
+        // Add variant declarations - keep only the correct format (without TypedDict)
         for variant_name in &variant_names {
+            if variant_name.contains("TypedDict") {
+                continue;
+            }
             // Determine if this is a simple or complex variant
             let is_complex = variant_classes.iter().any(|vc| vc.contains(&format!("{}_{}", enum_name, variant_name)));
             
             if is_complex {
-                buffer.push_str(&format!("    {} = {}_{}\n", variant_name, enum_name, variant_name));
+                buffer.push_str(&format!("    {} = {}_{}  # Complex variant with fields\n", variant_name, enum_name, variant_name));
             } else {
                 buffer.push_str(&format!("    {} = auto()\n", variant_name));
             }
