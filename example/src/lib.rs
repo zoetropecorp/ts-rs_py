@@ -7,124 +7,98 @@ use serde::{Deserialize, Serialize};
 use ts_rs::{Py, TS};
 use uuid::Uuid;
 
-
-
-#[derive(Serialize, TS, Py)]
-#[ts(rename_all = "lowercase")]
-#[ts(export, export_to = "UserRole.ts")]
-#[py(export)]
-enum Role {
-    User,
-    #[ts(rename = "administrator")]
-    Admin,
-}
-
-#[derive(Serialize, TS, Py)]
-// when 'serde-compat' is enabled, ts-rs tries to use supported serde attributes.
-#[serde(rename_all = "UPPERCASE")]
-#[ts(export)]
-#[py(export)]
-enum Gender {
-    Male,
-    Female,
-    Other,
-}
-
-#[derive(Serialize, TS, Py)]
-#[ts(export)]
-#[py(export)]
-struct User {
-    user_id: i32,
-    first_name: String,
-    last_name: String,
-    role: Role,
-    family: Vec<User>,
-    #[ts(inline)]
-    gender: Gender,
-    #[ts(type = "string")]
-    token: Uuid,
-    // NaiveDateTime is not supported, comment it out for now
-    // #[ts(type = "string")]
-    // created_at: NaiveDateTime,
-}
-
-#[derive(Serialize, TS, Py)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug, TS, Py)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 #[py(export)]
-enum Vehicle {
-    Bicycle { color: String },
-    Car { brand: String, color: String },
+pub enum Trigger {
+    #[serde(rename = "npc_killed")]
+    NPCKilled {
+        id: Uuid,
+    },
+    DialogueOptionChosen {
+        id: Uuid,
+    },
+    InProximity {
+        id: Uuid,
+    },
+    PhoneReplyChosen {
+        id: Uuid,
+    },
 }
 
-#[derive(Serialize, TS, Py)]
-#[ts(export)]
-#[py(export)]
-struct Point {
-    time: u64,
-    value: u64,
+fn get_true() -> bool {
+    true
 }
 
-#[derive(Serialize, TS, Py)]
-#[serde(default)]
-#[ts(export)]
-#[py(export)]
-struct Series {
-    points: Vec<Point>,
+#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
+pub struct DependencyState {
+    #[serde(flatten)]
+    pub trigger: Trigger,
+    #[serde(skip)]
+    pub is_complete: bool,
 }
 
-#[derive(Serialize, TS, Py)]
-#[serde(tag = "kind", content = "d")]
-#[ts(export)]
-#[py(export)]
-enum SimpleEnum {
-    A,
-    B,
+// impl<'de> Deserialize<'de> for DependencyState {
+//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//     where
+//         D: serde::Deserializer<'de>,
+//     {
+//         match D::deserialize() {
+//             Ok(trigger) => Ok<DependencyState{trigger, is_complete: false}>,
+//             Err(err) => Err(err)
+//         }
+//     }
+// }
+
+#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum Dependency {
+    Trigger(DependencyState),
+    Any(Vec<Dependency>),
+    All(Vec<Dependency>),
+    None(Vec<Dependency>),
+    NComplete { n: i32, deps: Vec<Dependency> },
 }
 
-#[derive(Serialize, TS, Py)]
-#[serde(tag = "kind", content = "data")]
-#[ts(export)]
-#[py(export)]
-enum ComplexEnum {
-    A,
-    B { foo: String, bar: f64 },
-    W(SimpleEnum),
-    F { nested: SimpleEnum },
-    V(Series),
-    U(User),
+#[derive(Debug, Deserialize, Serialize, Clone, TS, Py)]
+pub struct TriggerHandler {
+    pub id: Uuid,
+    pub dependency: Dependency,
+    pub commands: Vec<Command>,
+    pub children: Vec<TriggerHandler>,
+    pub group: Option<Uuid>,
 }
 
-#[derive(Serialize, TS, Py)]
-#[serde(tag = "kind")]
-#[ts(export)]
-#[py(export)]
-enum InlineComplexEnum {
-    A,
-    B { foo: String, bar: f64 },
-    W(SimpleEnum),
-    F { nested: SimpleEnum },
-    V(Series),
-    U(User),
+#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
+pub struct TriggerEvent {
+    #[serde(flatten)]
+    pub trigger: Trigger,
+    #[serde(default = "get_true")]
+    pub is_active: bool,
 }
 
-#[derive(Serialize, TS, Py)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-#[py(export)]
-struct ComplexStruct {
-    #[serde(default)]
-    pub string_tree: Option<String>,
+impl From<Trigger> for TriggerEvent {
+    fn from(trigger: Trigger) -> Self {
+        Self {
+            trigger,
+            is_active: true,
+        }
+    }
 }
 
-#[derive(Serialize, TS, Py)]
-#[ts(export)]
-#[py(export)]
-struct ComplexStruct2 {
-    #[serde(default)]
-    pub string_tree: Option<String>,
-    pub thing: InlineComplexEnum,
+impl From<TriggerEvent> for Trigger {
+    fn from(value: TriggerEvent) -> Self {
+        value.trigger
+    }
 }
+
+impl<'a> From<&'a TriggerEvent> for &'a Trigger {
+    fn from(value: &'a TriggerEvent) -> Self {
+        &value.trigger
+    }
+}
+
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, TS, Py)]
 pub struct Position {
@@ -265,8 +239,7 @@ pub struct PositionLog {
     pub building: String,
     pub room: String,
     pub name: String,
-    // pub tags: HashMap<String, String>,
-    pub tags_list: Vec<String>,
+    pub tags: HashMap<String, String>,
     pub description: String,
     pub orientation: Orientation,
     pub position: Position,
@@ -279,7 +252,7 @@ pub struct PositionLog {
 #[serde(tag = "command", rename_all = "snake_case")]
 #[ts(export)]
 #[py(export)]
-enum Command {
+pub enum Command {
     Move {
         npc_id: Uuid,
         dest: Option<MoveDest>,
@@ -357,88 +330,3 @@ enum Command {
         factions: Vec<Faction>,
     },
 }
-
-#[derive(Deserialize, Serialize, Clone, PartialEq, Debug, TS, Py)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[ts(export)]
-#[py(export)]
-pub enum Trigger {
-    #[serde(rename = "npc_killed")]
-    NPCKilled {
-        id: Uuid,
-    },
-    DialogueOptionChosen {
-        id: Uuid,
-    },
-    InProximity {
-        id: Uuid,
-    },
-    PhoneReplyChosen {
-        id: Uuid,
-    },
-}
-
-fn get_true() -> bool {
-    true
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
-pub struct DependencyState {
-    #[serde(flatten)]
-    pub trigger: Trigger,
-    #[serde(skip)]
-    pub is_complete: bool,
-}
-
-// impl<'de> Deserialize<'de> for DependencyState {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: serde::Deserializer<'de>,
-//     {
-//         match D::deserialize() {
-//             Ok(trigger) => Ok<DependencyState{trigger, is_complete: false}>,
-//             Err(err) => Err(err)
-//         }
-//     }
-// }
-
-#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum Dependency {
-    Trigger(DependencyState),
-    Any(Vec<Dependency>),
-    All(Vec<Dependency>),
-    None(Vec<Dependency>),
-    NComplete { n: i32, deps: Vec<Dependency> },
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, TS, Py)]
-pub struct TriggerHandler {
-    pub id: Uuid,
-    pub dependency: Dependency,
-    pub commands: Vec<Command>,
-    pub children: Vec<TriggerHandler>,
-    pub group: Option<Uuid>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
-pub struct TriggerEvent {
-    #[serde(flatten)]
-    pub trigger: Trigger,
-    #[serde(default = "get_true")]
-    pub is_active: bool,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
-pub struct TestStruct {
-    foo: String,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, TS, Py)]
-#[ts(export)]
-#[py(export)]
-pub struct TestStruct2 {
-    foo: String,
-    bar: TestStruct,
-}
-

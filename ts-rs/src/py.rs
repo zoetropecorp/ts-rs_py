@@ -1494,14 +1494,35 @@ fn export_all_into<T: Py + ?Sized + 'static>(
 
 /// Recursively export a type and its dependencies
 fn export_recursive<T: Py + ?Sized + 'static>(
-    seen: &mut std::collections::HashSet<TypeId>,
-    out_dir: impl AsRef<Path>,
+    seen: &mut std::collections::HashSet<TypeId>, // Use `seen` again
+    out_dir: impl AsRef<Path>,                // Use `impl AsRef<Path>` again
 ) -> Result<(), ExportError> {
-    if !seen.insert(TypeId::of::<T>()) {
+    let type_id = TypeId::of::<T>();
+
+    // *** ADD CHECK FOR STANDARD TYPES HERE ***
+    let type_ident = T::ident();
+    // Add explicit type annotation for the HashSet
+    let standard_types: std::collections::HashSet<&str> = [
+        "Any", "Optional", "List", "Dict", "Union", // Typing module
+        "int", "float", "bool", "str", "bytes", "None", // Python built-ins
+        "Path", // From pathlib
+        "Uuid", "NaiveDateTime", // Handled primitives
+        "Dummy", // Internal dummy type
+    ].iter().cloned().collect();
+
+    if standard_types.contains(type_ident.as_str()) {
+        // Don't try to export built-in or standard types
+        return Ok(());
+    }
+    // *** END CHECK ***
+
+    // Use `seen` here
+    if !seen.insert(type_id) {
+        // Already visited or currently visiting (cycle detected)
         return Ok(());
     }
     
-    let out_dir = out_dir.as_ref();
+    let out_dir = out_dir.as_ref(); // Ensure we have a &Path inside the function
     
     // First, export the current type
     let type_name = T::ident();
