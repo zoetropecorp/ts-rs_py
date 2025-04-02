@@ -150,20 +150,22 @@ pub trait Py {
         }
     }
 
-    /// Declaration of this type, e.g. `class User: user_id: int`.
-    /// This function will panic if the type has no declaration.
+    /// Declaration of this type, e.g. `User` or `List[User]`.
+    /// This should typically return the same as `name()`.
     fn decl() -> String;
 
-    /// Declaration of this type using the supplied generic arguments.
-    /// The resulting Python definition will not be generic. For that, see `Py::decl()`.
-    /// If this type is not generic, then this function is equivalent to `Py::decl()`.
+    /// Declaration of this type using concrete types for generics.
+    /// This should typically return the same as `name()`.
     fn decl_concrete() -> String;
+    
+    /// The full Python definition for this type (e.g., the class or enum block).
+    fn definition() -> String;
 
     /// Name of this type in Python, including generic parameters
     fn name() -> String;
 
-    /// Formats this types definition in Python.
-    /// This function will panic if the type cannot be inlined.
+    /// Formats this type's name for use inline (e.g., as a type hint).
+    /// Should typically return the same as `name()`.
     fn inline() -> String;
 
     /// Flatten a type declaration.  
@@ -288,33 +290,11 @@ pub trait Py {
     }
 
     /// Returns the output path to where `T` should be exported.  
-    /// The returned path does _not_ include the base directory from `TS_RS_PY_EXPORT_DIR`.  
-    ///
-    /// To get the output path containing `TS_RS_PY_EXPORT_DIR`, use [`Py::default_output_path`].
-    ///
-    /// When deriving `Py`, the output path can be altered using `#[py(export_to = "...")]`.  
-    ///
-    /// The output of this function depends on the environment variable `TS_RS_PY_EXPORT_DIR`, which is
-    /// used as base directory. If it is not set, `./py_bindings` is used as default directory.
-    ///
-    /// If `T` cannot be exported (e.g because it's a primitive type), this function will return
-    /// `None`.
     fn output_path() -> Option<&'static Path> {
         None
     }
 
-    /// Returns the output path to where `T` should be exported.  
-    ///
-    /// The output of this function depends on the environment variable `TS_RS_PY_EXPORT_DIR`, which is
-    /// used as base directory. If it is not set, `./py_bindings` is used as default directory.
-    ///
-    /// To get the output path relative to `TS_RS_PY_EXPORT_DIR` and without reading the environment
-    /// variable, use [`Py::output_path`].
-    ///
-    /// When deriving `Py`, the output path can be altered using `#[py(export_to = "...")]`.  
-    ///
-    /// If `T` cannot be exported (e.g because it's a primitive type), this function will return
-    /// `None`.
+    /// Returns the full default output path including the base directory.
     fn default_output_path() -> Option<PathBuf> {
         Some(default_py_out_dir().join(<Self as crate::Py>::output_path()?))
     }
@@ -334,7 +314,8 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     
     // Create the Python code with proper imports and declarations
     let mut buffer = String::with_capacity(1024);
-    let decl = T::decl_concrete();
+    // let decl = T::decl_concrete(); // OLD: This now returns just the name
+    let definition = T::definition(); // NEW: Use the full definition
     
     // Insert the definition on the line *before* `let mut imports = ...`
     let target_class_name = T::ident(); // Get the name of the class being exported
@@ -345,21 +326,30 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     // We'll collect typing imports separately to combine them
     let mut typing_imports = Vec::new();
     
-    // Standard imports based on what's actually used
-    if decl.contains("Optional[") {
+    // Standard imports based on what's actually used in the definition
+    if definition.contains("Optional[") {
         typing_imports.push("Optional");
     }
-    if decl.contains("List[") {
+    if definition.contains("List[") {
         typing_imports.push("List");
     }
-    if decl.contains("Dict[") {
+    if definition.contains("Dict[") {
         typing_imports.push("Dict");
     }
-    if decl.contains("Union[") {
+    if definition.contains("Union[") {
         typing_imports.push("Union");
     }
-    if decl.contains("Any") {
+    if definition.contains("Any") {
         typing_imports.push("Any");
+    }
+    if definition.contains("TypeVar") { // Added TypeVar check
+        typing_imports.push("TypeVar");
+    }
+    if definition.contains("Type") { // Added Type check
+        typing_imports.push("Type");
+    }
+    if definition.contains("cast") { // Added cast check
+        typing_imports.push("cast");
     }
     
     // Combine all typing imports into one line
@@ -369,59 +359,79 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     }
     
     // Add enum imports if needed
-    if decl.contains("class") && (decl.contains("(Enum)") || decl.contains("variant instance with fields")) {
+    if definition.contains("class") && (definition.contains("(Enum)") || definition.contains("variant instance with fields")) {
         imports.insert("from enum import Enum, auto".to_string());
     }
     
     // Add dataclass imports if needed
-    if decl.contains("@dataclass") {
-        imports.insert("from dataclasses import dataclass".to_string());
+    if definition.contains("@dataclass") {
+        imports.insert("from dataclasses import *".to_string());
     }
+
     
     // Add imports for other dependencies
-    // Manually scan the declaration to find types that need to be imported
-    // This is a workaround for the limitation in the current dependency tracking
+    // Manually scan the definition to find types that need to be imported
     let mut seen_types = std::collections::HashSet::new();
     
-    // External types are imported from their standard libraries
-    // but we don't also need to import the Uuid and NaiveDateTime types from local modules
-    if decl.contains("Uuid") {
+    // External types
+    if definition.contains("Uuid") {
         imports.insert("from uuid import UUID as Uuid".to_string());
-        seen_types.insert("Uuid".to_string()); // Prevent double import
+        seen_types.insert("Uuid".to_string()); 
     }
-    if decl.contains("NaiveDateTime") {
+    if definition.contains("NaiveDateTime") {
         imports.insert("from datetime import datetime as NaiveDateTime".to_string());
-        seen_types.insert("NaiveDateTime".to_string()); // Prevent double import
+        seen_types.insert("NaiveDateTime".to_string());
     }
     
-    // Scan the entire declaration text to find custom type references
-    let standard_types = ["int", "str", "bool", "float", "None", "List", "Dict", "Optional", 
-                         "Union", "Any", "Enum", "auto", "dataclass", "Type", "TypeVar", 
-                         "Generic", "TYPE_CHECKING", "Self", "Path", "Path("];
+    imports.insert("import sys".to_string());
+    imports.insert("from pathlib import Path".to_string());
     
-    for line in decl.lines() {
+    // Scan the entire definition text to find custom type references
+    let standard_types = ["int", "str", "bool", "float", "None", "List", "Dict", "Optional", 
+                         "Union", "Any", "Enum", "auto", "dataclass", "Type", "TypeVar", "TypedDict",
+                         "Generic", "TYPE_CHECKING", "Self", "Path", "Path(", "cast"]; // Added cast
+    
+    for line in definition.lines() { // Use definition here
         let line = line.trim();
         
-        // Skip comments and method definitions
-        if line.starts_with("#") || line.starts_with("def ") {
+        // Skip comments and method definitions (for import scanning)
+        if line.starts_with("#") || line.starts_with("def ") || line.starts_with("@classmethod") { // Skip methods too
             continue;
         }
         
-        // Process class relationships and variant references
-        if line.contains("=") && line.contains("Complex") {
+        // Process class inheritance (class Child(Parent):)
+        if line.starts_with("class ") {
+             if let Some(open_paren) = line.find('(') {
+                 if let Some(close_paren) = line.find(')') {
+                     let parent_part = &line[open_paren + 1..close_paren];
+                     for parent in parent_part.split(',') {
+                         let parent_name = parent.trim();
+                         if !parent_name.is_empty() && parent_name.chars().next().unwrap().is_uppercase() {
+                             let parent_string = parent_name.to_string();
+                             if !seen_types.contains(&parent_string) && !standard_types.contains(&parent_name) &&
+                                parent_string != target_class_name
+                             {
+                                 seen_types.insert(parent_string.clone());
+                                 imports.insert(format!("from {} import {}", parent_string, parent_string));
+                             }
+                         }
+                     }
+                 }
+             }
+        }
+
             // Handle variant references like "B = ComplexEnum_B"
+        if line.contains("=") && (line.contains("_") || line.contains("Complex")) { 
             if let Some(pos) = line.find('=') {
                 let value_part = line[pos+1..].trim();
                 let type_name = value_part.split_whitespace().next().unwrap_or("");
                 
                 if !type_name.is_empty() && type_name.chars().next().unwrap().is_uppercase() 
-                   && !type_name.contains("(") && !type_name.contains("{") && !type_name.contains("[") {
+                   && !type_name.contains('(') && !type_name.contains('{') && !type_name.contains('[') {
                     let type_string = type_name.to_string();
-                    
-                    // *** Check before inserting: Skip if type is defined in this file ***
                     if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) &&
                        type_string != target_class_name && 
-                       !type_string.starts_with(&format!("{}_", target_class_name)) // Skip variants like Command_Move
+                       !type_string.starts_with(&format!("{}_", target_class_name))
                     {
                         seen_types.insert(type_string.clone());
                         imports.insert(format!("from {} import {}", type_string, type_string));
@@ -430,47 +440,25 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
             }
         }
         
-        // Look for type annotations in field declarations
+        // Look for type annotations in field declarations ( field: Type )
         if let Some(colon_pos) = line.find(": ") {
-            // Get type part (after colon)
-            let type_part = &line[colon_pos + 2..];
-            
-            // Find the end of the type (stops at commas, equals, etc.)
-            let end_pos = type_part.find(|c| c == ',' || c == '=' || c == ')' || c == '}')
-                .unwrap_or_else(|| type_part.len());
-            
-            let type_name = type_part[..end_pos].trim();
-            
-            // Parse potential complex type expressions like List[User] or Dict[str, Role]
-            let mut types_to_check = Vec::new();
-            
-            // Handle container types
-            if type_name.contains('[') && type_name.contains(']') {
-                // Extract inner types from container types like List[User] or Dict[str, Role]
-                if let Some(bracket_pos) = type_name.find('[') {
-                    let inner_types = &type_name[bracket_pos+1..type_name.rfind(']').unwrap_or(type_name.len()-1)];
-                    
-                    // Split by commas for dictionary or union types
-                    for inner_part in inner_types.split(',') {
-                        types_to_check.push(inner_part.trim());
-                    }
-                }
+            let field_name_part = &line[..colon_pos].trim();
+            // Ensure it's a field line, not something else
+            if field_name_part.is_empty() || field_name_part.contains(' ') || field_name_part.contains('(') {
+                 continue;
             }
+
+            let type_part = &line[colon_pos + 2..];
+            let end_pos = type_part.find(|c| c == '=' || c == '#').unwrap_or_else(|| type_part.len());
+            let type_annotation = type_part[..end_pos].trim();
             
-            // Add the main type as well
-            types_to_check.push(type_name);
-            
-            // Process all type names (main and nested)
-            for type_str in types_to_check {
-                // Extract all potential class names by finding uppercase words
-                for part in type_str.split(|c: char| !c.is_alphanumeric()) {
+            // Extract all potential class names from the annotation (handles List[User], Dict[str, Role], Optional[...], etc.)
+            for part in type_annotation.split(|c: char| !c.is_alphanumeric() && c != '_') { // Include underscore
                     if !part.is_empty() && part.chars().next().unwrap().is_uppercase() {
                         let part_string = part.to_string();
-                        
-                        // *** Check before inserting: Skip if type is defined in this file ***
                         if !seen_types.contains(&part_string) && !standard_types.contains(&part) &&
                            part_string != target_class_name &&
-                           !part_string.starts_with(&format!("{}_", target_class_name)) // Skip variants
+                        !part_string.starts_with(&format!("{}_", target_class_name))
                         {
                             seen_types.insert(part_string.clone());
                             imports.insert(format!("from {} import {}", part_string, part_string));
@@ -480,957 +468,131 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
             }
         }
         
-        // Scan for special field patterns that might contain type references
-        // Handle tuple fields (field_0: Type)
-        if line.contains("field_") && line.contains(':') && !line.contains("def ") {
-            let field_parts: Vec<&str> = line.split(':').collect();
-            if field_parts.len() >= 2 {
-                let field_name = field_parts[0].trim();
-                
-                // Skip if field looks like a Python code fragment
-                if !field_name.is_empty() && 
-                   !field_name.contains("(") && !field_name.contains(")") &&
-                   !field_name.contains(" if ") && !field_name.contains(" for ") && 
-                   !field_name.contains(" in ") && !field_name.contains(" return ") &&
-                   !field_name.contains(" elif ") && !field_name.contains(" else") &&
-                   !is_python_fragment(field_name) {
-                   
-                    let type_part = field_parts[1].trim();
-                    let type_name = type_part.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
-                    
-                    if !type_name.is_empty() && type_name.chars().next().unwrap().is_uppercase() {
-                        let type_string = type_name.to_string();
-                        
-                        // *** Check before inserting: Skip if type is defined in this file ***
-                        if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) &&
-                           type_string != target_class_name &&
-                           !type_string.starts_with(&format!("{}_", target_class_name)) // Skip variants
-                        {
-                            seen_types.insert(type_string.clone());
-                            imports.insert(format!("from {} import {}", type_string, type_string));
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Handle named fields like "nested" that often reference other types
-        for field_name in ["nested", "inner", "data", "value", "content"] {
-            let field_pattern = format!("{}: ", field_name);
-            // Skip if this is a function definition
-            if line.contains(&field_pattern) && !line.contains("def ") {
-                if let Some(pos) = line.find(&field_pattern) {
-                    let type_part = &line[pos + field_pattern.len()..].trim();
-                    let type_name = type_part.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
-                    
-                    if !type_name.is_empty() && type_name.chars().next().unwrap().is_uppercase() {
-                        let type_string = type_name.to_string();
-                        
-                        // *** Check before inserting: Skip if type is defined in this file ***
-                        if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) &&
-                           type_string != target_class_name &&
-                           !type_string.starts_with(&format!("{}_", target_class_name)) // Skip variants
-                        {
-                            seen_types.insert(type_string.clone());
-                            imports.insert(format!("from {} import {}", type_string, type_string));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Also specifically search for variant class references that might be missed in regular parsing
-    // This addresses complex enum variant references
-    for part in decl.split_whitespace() {
-        if part.contains('_') {
-            let parts: Vec<&str> = part.split('_').collect();
-            if parts.len() >= 2 {
+    // Scan again for variant classes like EnumName_VariantName
+    for word in definition.split(|c: char| !c.is_alphanumeric() && c != '_') { // Use definition
+        if word.contains('_') {
+            let parts: Vec<&str> = word.splitn(2, '_').collect();
+            if parts.len() == 2 {
                 let prefix = parts[0];
-                
-                // If it contains an underscore and the first part starts with uppercase,
-                // it's likely a variant class reference like ComplexEnum_VariantName
-                if !prefix.is_empty() && prefix.chars().next().unwrap().is_uppercase() 
-                   && !standard_types.contains(&prefix) && !seen_types.contains(prefix) {
-                    // *** Check before inserting: Skip if prefix matches target class name ***
-                    if prefix != target_class_name { 
+                if !prefix.is_empty() && prefix.chars().next().unwrap().is_uppercase() &&
+                   !standard_types.contains(&prefix) && !seen_types.contains(prefix) &&
+                   prefix == target_class_name // Check if prefix matches the main class being exported
+                {
+                    // This looks like a variant class (e.g., MyEnum_VariantA) defined *within* the current definition.
+                    // We don't need to import the Enum itself if we are defining its variant.
+                }
+                // Check if prefix is *another* enum/class that needs importing
+                else if !prefix.is_empty() && prefix.chars().next().unwrap().is_uppercase() &&
+                   !standard_types.contains(&prefix) && !seen_types.contains(prefix) &&
+                   prefix != target_class_name
+                {
                         seen_types.insert(prefix.to_string());
                         imports.insert(format!("from {} import {}", prefix, prefix));
-                    }
                 }
             }
         }
     }
     
-    // Create an organized buffer that ensures __future__ imports are first
+    // --- Assemble the final file content --- 
+    buffer.clear(); // Start fresh
     
-    // 1. Start with __future__ imports (MUST be first)
+    // 1. __future__ imports
     buffer.push_str("from __future__ import annotations\n\n");
     
-    // 2. Add standard library imports
-    buffer.push_str("import json\n");
+    // 2. Standard library imports (ensure necessary ones are present)
+    if definition.contains("json.") { buffer.push_str("import json\n"); }
     buffer.push_str("import sys\n");
-    buffer.push_str("from pathlib import Path\n");
-    buffer.push_str("from enum import Enum, auto\n");
-    buffer.push_str("from typing import Any, Optional, List, Dict, Union, TypedDict, TYPE_CHECKING\n");
-    buffer.push_str("from dataclasses import dataclass\n\n");
+    if definition.contains("Path(") { buffer.push_str("from pathlib import Path\n"); }
+    if definition.contains("(Enum)") || definition.contains("auto()") { buffer.push_str("from enum import Enum, auto\n"); }
+    if definition.contains("@dataclass") { buffer.push_str("from dataclasses import *\n"); }
     
-    // 3. Add path handling for imports
-    buffer.push_str("\n# Add current directory to Python path to facilitate imports\n");
-    buffer.push_str("_current_file = Path(__file__).resolve()\n");
-    buffer.push_str("_current_dir = _current_file.parent\n");
-    buffer.push_str("if str(_current_dir) not in sys.path:\n");
-    buffer.push_str("    sys.path.append(str(_current_dir))\n\n");
-    
-    // 3. Add type checking block
-    buffer.push_str("# Forward references for type checking only\n");
-    buffer.push_str("if TYPE_CHECKING:\n");
-    
-    // Add collected custom imports under TYPE_CHECKING to avoid circular imports
-    let mut custom_imports = Vec::new();
-    // Use the original `imports` set directly
-    for import in &imports { 
-        if !import.starts_with("from typing import") && 
-           !import.starts_with("from enum import") && 
-           !import.starts_with("from dataclasses import") &&
-           !import.starts_with("from pathlib import") &&
-           import != "import json" {
-            // Fix malformed imports
-            if import.contains("from Path(") || import.contains("import Path(") {
-                continue; // Skip malformed Path imports
-            }
-            custom_imports.push(format!("    {}", import));
-        }
+    // Add combined typing import if needed
+    if !typing_imports.is_empty() {
+        typing_imports.sort();
+        buffer.push_str(&format!("from typing import {}\n", typing_imports.join(", ")));
     }
-    
-    if !custom_imports.is_empty() {
-        custom_imports.sort(); // Sort for consistent output
-        for import_stmt in custom_imports {
-            buffer.push_str(&format!("{}\n", import_stmt));
-        }
-    } else {
-        buffer.push_str("    pass  # Type checking imports will be used via annotations\n");
-    }
+    buffer.push_str("from typing import TYPE_CHECKING\n"); // Always add TYPE_CHECKING
     buffer.push_str("\n");
     
-    // 5. Remove duplicated imports and path handling from the declaration
-    let mut cleaned_lines = Vec::new();
-    let mut inside_path_block = false;
-    
-    for line in decl.lines() {
-        if inside_path_block && (line.contains("sys.path.append") || line.trim().is_empty()) {
-            inside_path_block = false;
-            continue;
-        }
-        
-        if line.contains("_current_file = Path") || 
-           line.contains("_current_dir = ") || 
-           line.contains("if str(_current_dir) not in sys.path") {
-            inside_path_block = true;
-            continue;
-        }
-        
-        // Skip boilerplate imports and code we've already added
-        if line.starts_with("from __future__ import") ||
-           line.starts_with("from typing import") || 
-           line.starts_with("from enum import") || 
-           line.starts_with("import json") ||
-           line.starts_with("import sys") ||
-           line.starts_with("from pathlib import") ||
-           line.starts_with("from dataclasses import") ||
-           line.contains("sys.path.append") ||
-           line.contains("TYPE_CHECKING") ||
-           (line.contains("# Add current directory to Python path") || 
-            line.contains("# Forward references for type checking only") || 
-            line.contains("# Helper for import path resolution") || 
-            line.contains("# Import utilities and custom types") ||
-            line.contains("# Prevent circular imports with TYPE_CHECKING")) {
-            continue;
-        }
-        
-        // Skip additional empty lines after removed imports
-        if cleaned_lines.last().map_or(false, |last: &&str| last.trim().is_empty()) && line.trim().is_empty() {
-            continue;
-        }
-        
-        cleaned_lines.push(line);
-    }
-    
-    let cleaned_decl = normalize_field_spacing(&cleaned_lines.join("\n"));
-    
-    // We do the following steps to clean up the code:
-    // 1. Extract the class definition (first occurrence only)
-    // 2. Remove existing toJSON and _serialize methods
-    // 3. Add our specialized toJSON and _serialize methods
-    
-    let class_name = T::ident();
-    let mut clean_buffer = String::new();
-    let mut in_class = false;
-    let mut class_found = false;
-    let mut inside_method = false;
-    let mut _indent = "    "; // Default indentation
-    
-    // First pass: extract class definition and non-toJSON methods
-    for line in cleaned_decl.lines() {
-        let trimmed = line.trim();
-        
-        // Detect class definitions
-        if trimmed.starts_with("class ") {
-            if line.contains(&class_name) {
-                // For the target class
-                if !class_found {
-                    class_found = true;
-                    in_class = true;
-                    clean_buffer.push_str(line);
-                    clean_buffer.push('\n');
-                    
-                    // Save the indentation level for this class
-                    if let Some(class_pos) = line.find("class") {
-                        if class_pos > 0 {
-                            _indent = &line[0..class_pos];
-                        }
-                    }
-                }
-                // Skip duplicate definitions of the same class
-            } else {
-                // For other classes, just include them
-                in_class = true;
-                clean_buffer.push_str(line);
-                clean_buffer.push('\n');
-            }
-            continue;
-        }
-        
-        // Track when we're inside a method to avoid including toJSON or _serialize
-        if in_class && trimmed.starts_with("def ") {
-            // Check if this is a toJSON or _serialize method that we want to replace
-            if trimmed.starts_with("def toJSON(self)") || trimmed.starts_with("def _serialize(self)") {
-                inside_method = true;
-                continue;
-            } else if trimmed.starts_with("def fromJSON(cls") {
-                // Replace fromJSON with our implementation later
-                inside_method = true;
-                continue;
-            } else {
-                inside_method = true;
-                clean_buffer.push_str(line);
-                clean_buffer.push('\n');
-                continue;
-            }
-        }
-        
-        // End of method detection
-        if inside_method && (trimmed.is_empty() || trimmed.starts_with("def ") || trimmed.starts_with("class ")) {
-            inside_method = false;
-        }
-        
-        // Include non-method lines and method lines for methods we're not replacing
-        if !inside_method || !in_class {
-            clean_buffer.push_str(line);
-            clean_buffer.push('\n');
-        }
-    }
-    
-    // Generate a completely new Python file with all needed parts
-    buffer.clear();
-    
-    // 1. Add the standard imports
-    buffer.push_str("from __future__ import annotations\n\n");
-    buffer.push_str("import json\n");
-    buffer.push_str("import sys\n");
-    buffer.push_str("from pathlib import Path\n");
-    buffer.push_str("from enum import Enum, auto\n");
-    buffer.push_str("from typing import Any, Optional, List, Dict, Union, TypedDict, TYPE_CHECKING\n");
-    buffer.push_str("from dataclasses import dataclass\n\n");
-    
-    // 2. Add path handling for imports
+    // 3. Path handling logic (optional, could be removed if imports handle it)
+    // Check if definition itself includes path logic, if not, add it.
+    if !definition.contains("_current_file = Path(__file__)") { 
     buffer.push_str("# Add current directory to Python path to facilitate imports\n");
     buffer.push_str("_current_file = Path(__file__).resolve()\n");
     buffer.push_str("_current_dir = _current_file.parent\n");
     buffer.push_str("if str(_current_dir) not in sys.path:\n");
     buffer.push_str("    sys.path.append(str(_current_dir))\n\n");
+    }
     
-    // 3. Add type checking block
+    // 4. TYPE_CHECKING block for custom imports
     buffer.push_str("# Forward references for type checking only\n");
     buffer.push_str("if TYPE_CHECKING:\n");
-    
-    // Filter out imports for the class itself or its variants defined in the same file
-    let target_class_name = T::ident();
-    let mut filtered_imports = imports.clone(); // Clone to allow modification
-    
-    imports.iter().for_each(|import_stmt| {
-        // Expected format: "from Module import Class"
-        let parts: Vec<&str> = import_stmt.split_whitespace().collect();
-        if parts.len() >= 4 && parts[0] == "from" && parts[2] == "import" {
-            let module_name = parts[1];
-            let class_name = parts[3]; // Class name might be different if aliased, but usually same
-            
-            // Check if module name matches the target class or a variant pattern
-            if module_name == target_class_name || class_name == target_class_name ||
-               (module_name.starts_with(&format!("{}_", target_class_name)) && class_name.starts_with(&format!("{}_", target_class_name)))
-            {
-                filtered_imports.remove(import_stmt);
-            }
-        }
-    });
-    
-    // Add collected custom imports under TYPE_CHECKING to avoid circular imports
     let mut custom_imports = Vec::new();
-    // Use the filtered set now
-    for import in &filtered_imports {
-        if !import.starts_with("from typing import") && 
-           !import.starts_with("from enum import") && 
-           !import.starts_with("from dataclasses import") &&
-           !import.starts_with("from pathlib import") &&
-           import != "import json" {
-            // Fix malformed imports
-            if import.contains("from Path(") || import.contains("import Path(") {
-                continue; // Skip malformed Path imports
-            }
-            custom_imports.push(format!("    {}", import));
+    for import in &imports {
+        // Filter out stdlib/typing imports already handled
+        if !(import.starts_with("from typing import") ||
+             import.starts_with("from enum import") ||
+             import.starts_with("from dataclasses import") ||
+             import.starts_with("from pathlib import") ||
+             import.starts_with("from uuid import") || // Handled externally
+             import.starts_with("from datetime import") || // Handled externally
+             import == "import json" ||
+             import == "import sys")
+        {
+             // Basic check for malformed imports from Path objects
+             if !import.contains("Path(") {
+                 custom_imports.push(format!("    {}", import));
+             }
         }
     }
     
     if !custom_imports.is_empty() {
-        custom_imports.sort(); // Sort for consistent output
-        for import_stmt in custom_imports {
-            buffer.push_str(&format!("{}\n", import_stmt));
-        }
-    } else {
-        buffer.push_str("    pass  # Type checking imports will be used via annotations\n");
-    }
+        custom_imports.sort();
+        buffer.push_str(&custom_imports.join("\n"));
     buffer.push_str("\n");
-    
-    // 4. Extract the main class definition (and only that)
-    let mut class_def = String::new();
-    let mut fields = Vec::new();
-    let mut inside_class = false;
-    let mut class_indent = ""; // Remember the indentation of the class
-    let target_class_name = T::ident(); // Get the name of the class we are exporting
-    let mut is_target_class = false; // Track if we are currently inside the target class
-
-    for line in clean_buffer.lines() { // clean_buffer comes from cleaned_decl
-        if line.trim().starts_with("class ") {
-            // Start of a class definition
-            if let Some(class_pos) = line.find("class") {
-                if class_pos > 0 {
-                    class_indent = &line[0..class_pos];
-                }
-            }
-            // Determine the name of the class defined on this line
-            let current_class_name = line.trim().split(&[' ', '(', ':'][..]).nth(1).unwrap_or("");
-            if !is_target_class && current_class_name == target_class_name {
-                // Found the target class definition
-                is_target_class = true; // We are now inside the target class
-                inside_class = true;
-                class_def.push_str(line); // Start accumulating its definition
-                class_def.push_str("\n"); // Corrected: use double quotes for string literal
             } else {
-                // If we encounter another class (or already passed the target), stop processing for fields
-                is_target_class = false;
-                inside_class = false; // Treat as outside relevant class scope for field collection
-                // We still need to include other class definitions in the final output later,
-                // but we don't collect their fields for the main class methods.
-            }
-        } else if is_target_class && !line.trim().is_empty() { // Only process lines if inside the target class
-            // Skip any method definitions, we'll add our own later
-            if !line.trim().starts_with("def ") && !line.trim().starts_with("@") {
-                class_def.push_str(line); // Accumulate non-method lines for the target class
-                class_def.push_str("\n"); // Corrected: use double quotes for string literal
-
-                // Extract field declarations ONLY from the target class
-                if line.contains(":") && !line.contains("class") && !line.trim().starts_with("#") && !line.trim().starts_with("def ") {
-                    // Make sure this is a valid field declaration and not a fragment of method code
-                    let parts: Vec<&str> = line.trim().split(':').collect();
-                    if parts.len() >= 2 {
-                        let field_name = parts[0].trim();
-                        // Skip if field looks like a Python code fragment or keyword
-                        if !field_name.is_empty() &&
-                           !field_name.contains("(") && !field_name.contains(")") &&
-                           !field_name.contains(" if ") && !field_name.contains(" for ") &&
-                           !field_name.contains(" in ") && !field_name.contains(" return ") &&
-                           !field_name.contains(" elif ") && !field_name.contains(" else") &&
-                           !is_python_fragment(field_name) && !is_python_keyword(field_name) {
-                            fields.push(field_name.to_string()); // <<< Only push fields for the target class
-                        }
-                    }
-                }
-             }
-        } else if is_target_class && line.trim().is_empty() { // Keep empty lines within the target class def
-            class_def.push_str("\n"); // Corrected: use double quotes for string literal
-        } else if !inside_class {
-            // For non-class content (outside the target class scope we just defined), handle imports etc. if needed
-            // This part might need adjustment depending on overall structure, but the key is `fields` is now correct.
-            // For now, assume other content is handled elsewhere or doesn't affect field collection.
-        }
+        buffer.push_str("    pass\n");
     }
-    
-    // Add the class definition (without methods)
-    buffer.push_str(&class_def);
-    
-    // Extract the class name 
-    let _class_name = T::ident();
-    
-    // Extract indentation from the class definition
-    let _indent = class_indent; // Use the indentation we captured earlier
-    
-    // For enum types, we have special handling
-    if class_def.contains("class") && class_def.contains("(Enum)") {
-        // Add toJSON method
-        buffer.push_str("\n    def toJSON(self) -> str:\n");
-        buffer.push_str("        \"\"\"Serialize this object to a JSON string\"\"\"\n");
-        buffer.push_str("        return json.dumps(self._serialize())\n\n");
-        
-        // Add _serialize method
-        buffer.push_str("    def _serialize(self):\n");
-        buffer.push_str("        \"\"\"Convert this object to a serializable dictionary\"\"\"\n");
-        buffer.push_str("        # Enum serialization\n");
-        buffer.push_str("        return self.name\n\n");
-        
-        // Add fromJSON method
-        buffer.push_str("    @classmethod\n");
-        buffer.push_str("    def fromJSON(cls, json_str):\n");
-        buffer.push_str("        \"\"\"Deserialize JSON string to a new instance\"\"\"\n");
-        buffer.push_str("        data = json.loads(json_str)\n");
-        buffer.push_str("        return cls.fromDict(data)\n\n");
-        
-        // Add fromDict method
-        buffer.push_str("    @classmethod\n");
-        buffer.push_str("    def fromDict(cls, data):\n");
-        buffer.push_str("        \"\"\"Deserialize dict to an enum instance\"\"\"\n");
-        buffer.push_str("        if isinstance(data, str):\n");
-        buffer.push_str("            return cls[data]  # Get enum by name\n");
-        buffer.push_str("        elif isinstance(data, int):\n");
-        buffer.push_str("            # Get enum by value if it's an integer\n");
-        buffer.push_str("            for enum_item in cls:\n");
-        buffer.push_str("                if enum_item.value == data:\n");
-        buffer.push_str("                    return enum_item\n");
-        buffer.push_str("        # Default fallback - return first variant\n");
-        buffer.push_str("        return next(iter(cls))\n");
-    } 
-    // For complex enums with data
-    else if cleaned_decl.contains("class") && cleaned_decl.contains("variant instance with fields") {
-        // Extract the main enum class name from the declaration
-        let enum_name = _class_name.clone();
-        
-        // First, we need to extract variant information and their data from the declaration
-        // This helps us generate proper variant class definitions
-        
-        let mut variant_classes = Vec::new();
-        let mut variant_names = Vec::new();
-        let mut is_collecting_variant = false;
-        let mut current_variant_data = String::new();
-        let mut current_variant_name = String::new();
-        let mut current_class_fields = HashSet::new(); // Track fields we've seen for the current class
-        
-        // Parse the declaration to find variant class definitions
-        for line in cleaned_decl.lines() {
-            let trimmed = line.trim();
-            
-            // Detect the start of a variant class declaration
-            if trimmed.starts_with("class") && line.contains("_") && !is_collecting_variant {
-                is_collecting_variant = true;
-                current_variant_data = format!("{}\n", line);
-                current_class_fields.clear(); // Clear fields when starting a new class
-                
-                // Extract variant name from class name
-                if let Some(class_start) = trimmed.find("class ") {
-                    let after_class = &trimmed[class_start + 6..];
-                    if let Some(space_end) = after_class.find(|c: char| c.is_whitespace() || c == ':') {
-                        let class_name = &after_class[..space_end];
-                        if let Some(underscore_pos) = class_name.find('_') {
-                            current_variant_name = class_name[underscore_pos+1..].to_string();
-                            variant_names.push(current_variant_name.clone());
-                        }
-                    }
-                }
-                
-                continue;
-            }
-            
-            // Collect lines for the current variant class
-            if is_collecting_variant {
-                // If we hit another class or enum definition, we're done with this variant
-                if trimmed.starts_with("class ") || trimmed.starts_with("enum ") {
-                    is_collecting_variant = false;
-                    variant_classes.push(current_variant_data.clone());
-                    current_variant_data.clear();
-                    current_class_fields.clear(); // Clear fields at the end of a class
-                    
-                    // Start collecting the new class immediately if it's a variant
-                    if trimmed.starts_with("class") && line.contains("_") {
-                        is_collecting_variant = true;
-                        current_variant_data = format!("{}\n", line);
-                        
-                        // Extract variant name
-                        if let Some(class_start) = trimmed.find("class ") {
-                            let after_class = &trimmed[class_start + 6..];
-                            if let Some(space_end) = after_class.find(|c: char| c.is_whitespace() || c == ':') {
-                                let class_name = &after_class[..space_end];
-                                if let Some(underscore_pos) = class_name.find('_') {
-                                    current_variant_name = class_name[underscore_pos+1..].to_string();
-                                    variant_names.push(current_variant_name.clone());
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Process field declarations to avoid duplicate fields
-                    if trimmed.contains(":") && !trimmed.starts_with("class") && !trimmed.starts_with("#") && !trimmed.starts_with("def ") {
-                        let parts: Vec<&str> = trimmed.split(':').collect();
-                        if parts.len() >= 2 {
-                            let field_name = parts[0].trim();
-                            
-                            // Only add if we haven't seen this field for the current class
-                            if !current_class_fields.contains(field_name) {
-                                current_class_fields.insert(field_name.to_string());
-                                // Add the line to the variant data
-                                current_variant_data.push_str(&format!("{}\n", line));
-                            }
-                        } else {
-                            // Add non-field line
-                            current_variant_data.push_str(&format!("{}\n", line));
-                        }
-                    } else {
-                        // Add non-field line
-                        current_variant_data.push_str(&format!("{}\n", line));
-                    }
-                }
-            }
-            
-            // Check for main enum class declaration
-            if !is_collecting_variant && trimmed.starts_with("class") && trimmed.contains("(Enum)") && !line.contains("_") {
-                // We've found the main enum class, but we don't start collecting yet
-                // Just track when we've seen it
-            }
-            
-            // Check for variant mappings in the main enum class (e.g., "B = ComplexEnum_B")
-            if !is_collecting_variant && trimmed.contains("=") && trimmed.contains("_") {
-                let parts: Vec<&str> = trimmed.split('=').collect();
-                if parts.len() >= 2 {
-                    let variant_name = parts[0].trim();
-                    // Only add valid Python identifiers, not keywords or fragments
-                    if !variant_name.is_empty() && 
-                        !variant_names.contains(&variant_name.to_string()) &&
-                        !is_python_keyword(variant_name) && 
-                        !is_python_fragment(variant_name) &&
-                        // Exclude fragments that look like code
-                        !variant_name.contains(".") &&
-                        !variant_name.contains("_serialize") &&
-                        !variant_name.contains("toJSON") &&
-                        !variant_name.contains("fromDict") &&
-                        !variant_name.contains("data") &&
-                        !variant_name.contains("variant") {
-                        variant_names.push(variant_name.to_string());
-                    }
-                }
-            }
-        }
-        
-        // If we're still collecting the last variant when we reach the end
-        if is_collecting_variant && !current_variant_data.is_empty() {
-            variant_classes.push(current_variant_data);
-        }
-        
-        // 1. Generate all variant dataclasses first
-        // This creates the necessary helper classes for the complex enum variants
-        
-        // Initialize a buffer for variant classes
-        let mut variant_classes_buffer = String::new();
-        
-        for variant_class in &variant_classes {
-            // Extract field names and types from the variant class
-            let mut field_names = Vec::new();
-            let mut field_types = Vec::new();
-            
-            for line in variant_class.lines() {
-                let line = line.trim();
-                
-                // Look for field definitions like "foo: str"
-                if line.contains(":") && !line.starts_with("class") && !line.starts_with("#") && !line.starts_with("def ") {
-                    let parts: Vec<&str> = line.split(':').collect();
-                    if parts.len() >= 2 {
-                        let field_name = parts[0].trim();
-                        let field_type = parts[1].trim();
-                        
-                        if !field_name.is_empty() && 
-                           !field_name.contains("(") && !field_name.contains(")") &&
-                           !field_name.contains(" if ") && !field_name.contains(" for ") && 
-                           !field_name.contains(" in ") && !field_name.contains(" return ") &&
-                           !field_name.contains(" elif ") && !field_name.contains(" else") &&
-                           !is_python_fragment(field_name) && !is_python_keyword(field_name) {
-                            field_names.push(field_name.to_string());
-                            field_types.push(field_type.to_string());
-                        }
-                    }
-                }
-            }
-            
-            // Extract variant class name
-            let mut variant_class_name = String::new();
-            if let Some(class_line) = variant_class.lines().next() {
-                if class_line.contains("class ") {
-                    let parts: Vec<&str> = class_line.split("class ").collect();
-                    if parts.len() >= 2 {
-                        if let Some(end_pos) = parts[1].find(|c: char| c.is_whitespace() || c == ':') {
-                            variant_class_name = parts[1][..end_pos].trim().to_string();
-                        } else {
-                            variant_class_name = parts[1].trim().to_string();
-                        }
-                    }
-                }
-            }
-            
-            if !variant_class_name.is_empty() {
-                // Generate a complete dataclass for this variant
-                variant_classes_buffer.push_str(&format!("@dataclass\nclass {}:\n", variant_class_name));
-                
-                // Add field definitions
-                for (i, (name, type_)) in field_names.iter().zip(field_types.iter()).enumerate() {
-                    // Skip method definitions that were incorrectly parsed as fields
-                    if name.starts_with("def ") {
-                        continue;
-                    }
-                    variant_classes_buffer.push_str(&format!("    {}: {}\n", name, type_));
-                }
-                
-                if field_names.is_empty() || field_names.iter().all(|name| name.starts_with("def ")) {
-                    variant_classes_buffer.push_str("    pass\n");
-                }
-                
-                // Add constructor
-                let valid_field_names: Vec<_> = field_names.iter()
-                    .filter(|name| {
-                        !name.starts_with("def ") &&
-                        !name.contains("(") && !name.contains(")") &&
-                        !name.contains(" if ") && !name.contains(" for ") && 
-                        !name.contains(" in ") && !name.contains(" return ") &&
-                        !name.contains(" elif ") && !name.contains(" else") &&
-                        !is_python_fragment(name) &&
-                        !is_python_keyword(name)
-                    })
-                    .collect();
-
-                if !valid_field_names.is_empty() {
-                    variant_classes_buffer.push_str("\n    def __init__(self");
-                    
-                    // Add parameters with type hints - only include actual fields
-                    for name in &valid_field_names {
-                        variant_classes_buffer.push_str(&format!(", {}", name));
-                    }
-                    
-                    variant_classes_buffer.push_str("):\n");
-                    
-                    // Add field assignments - only include actual fields
-                    for name in &valid_field_names {
-                        variant_classes_buffer.push_str(&format!("        self.{} = {}\n", name, name));
-                    }
-                }
-                
-                // Add toJSON method
-                variant_classes_buffer.push_str("\n    def toJSON(self) -> str:\n");
-                variant_classes_buffer.push_str("        \"\"\"Serialize this object to a JSON string\"\"\"\n");
-                variant_classes_buffer.push_str("        return json.dumps(self._serialize())\n\n");
-                
-                // Add _serialize method
-                variant_classes_buffer.push_str("    def _serialize(self):\n");
-                variant_classes_buffer.push_str("        \"\"\"Convert this object to a serializable dictionary\"\"\"\n");
-                variant_classes_buffer.push_str("        result = {}\n");
-                variant_classes_buffer.push_str("        for key, value in self.__dict__.items():\n");
-                variant_classes_buffer.push_str("            # Skip private fields\n");
-                variant_classes_buffer.push_str("            if key.startswith('_'):\n");
-                variant_classes_buffer.push_str("                continue\n");
-                variant_classes_buffer.push_str("            # Recursively serialize any nested objects\n");
-                variant_classes_buffer.push_str("            if hasattr(value, '_serialize'):\n");
-                variant_classes_buffer.push_str("                result[key] = value._serialize()\n");
-                variant_classes_buffer.push_str("            elif isinstance(value, list):\n");
-                variant_classes_buffer.push_str("                result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]\n");
-                variant_classes_buffer.push_str("            elif isinstance(value, dict):\n");
-                variant_classes_buffer.push_str("                result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}\n");
-                variant_classes_buffer.push_str("            elif isinstance(value, Enum):\n");
-                variant_classes_buffer.push_str("                result[key] = value.name\n");
-                variant_classes_buffer.push_str("            else:\n");
-                variant_classes_buffer.push_str("                result[key] = value\n");
-                variant_classes_buffer.push_str("        return result\n\n");
-                
-                // Add fromDict method
-                variant_classes_buffer.push_str("    @classmethod\n");
-                variant_classes_buffer.push_str("    def fromDict(cls, data):\n");
-                variant_classes_buffer.push_str("        \"\"\"Create an instance from a dictionary\"\"\"\n");
-                
-                if !field_names.is_empty() {
-                    // Filter out any fields that look like code fragments
-                    let valid_field_names: Vec<_> = field_names.iter()
-                        .filter(|name| {
-                            !name.starts_with("def ") &&
-                            !name.contains("(") && !name.contains(")") &&
-                            !name.contains(" if ") && !name.contains(" for ") && 
-                            !name.contains(" in ") && !name.contains(" return ") &&
-                            !name.contains(" elif ") && !name.contains(" else") &&
-                            !is_python_fragment(name) &&
-                            !is_python_keyword(name)
-                        })
-                        .collect();
-                    
-                    let valid_field_types: Vec<_> = field_names.iter()
-                        .zip(field_types.iter())
-                        .filter(|(name, _)| {
-                            !name.starts_with("def ") &&
-                            !name.contains("(") && !name.contains(")") &&
-                            !name.contains(" if ") && !name.contains(" for ") && 
-                            !name.contains(" in ") && !name.contains(" return ") &&
-                            !name.contains(" elif ") && !name.contains(" else") &&
-                            !is_python_fragment(name) &&
-                            !is_python_keyword(name)
-                        })
-                        .map(|(_, typ)| typ)
-                        .collect();
-                    
-                    for (i, (name, type_)) in valid_field_names.iter().zip(valid_field_types.iter()).enumerate() {
-                        let stripped_type = type_.split('[').next().unwrap_or("").trim();
-                        
-                        // Add import for the appropriate type - needs to be delayed to execution time
-                        let is_known_type = ["int", "str", "bool", "float", "list", "dict", "Any", "Union", 
-                                          "Optional", "List", "Dict"].contains(&stripped_type);
-                        
-                        if !is_known_type && stripped_type.chars().next().map_or(false, |c| c.is_uppercase()) {
-                            variant_classes_buffer.push_str(&format!("        # Import {} type at runtime\n", stripped_type));
-                            variant_classes_buffer.push_str(&format!("        try:\n"));
-                            variant_classes_buffer.push_str(&format!("            from {} import {}\n", stripped_type, stripped_type));
-                            variant_classes_buffer.push_str(&format!("        except ImportError:\n"));
-                            variant_classes_buffer.push_str(&format!("            pass  # Type not available, will use generic handling\n"));
-                        }
-                        
-                        variant_classes_buffer.push_str(&format!("        {} = data.get('{}', None)\n", name, name));
-                        
-                        // Add special handling for nested types
-                        if !is_known_type && stripped_type.chars().next().map_or(false, |c| c.is_uppercase()) {
-                            variant_classes_buffer.push_str(&format!("        if isinstance({}, dict) and '{}' in locals():\n", name, stripped_type));
-                            variant_classes_buffer.push_str(&format!("            {} = {}.fromDict({})\n", name, stripped_type, name));
-                            variant_classes_buffer.push_str(&format!("        elif isinstance({}, str) and '{}' in locals() and hasattr({}, '__contains__'):\n", name, stripped_type, stripped_type));
-                            variant_classes_buffer.push_str(&format!("            try:\n"));
-                            variant_classes_buffer.push_str(&format!("                {} = {}[{}]\n", name, stripped_type, name));
-                            variant_classes_buffer.push_str(&format!("            except (KeyError, ValueError):\n"));
-                            variant_classes_buffer.push_str(&format!("                pass  # Leave as string if not a valid enum value\n"));
-                        }
-                    }
-                    
-                    // Filter out method definitions from the generated code
-                    variant_classes_buffer.push_str("        # Filter out method definitions and only pass actual field values\n");
-                    variant_classes_buffer.push_str("        return cls(");
-                    
-                    for (i, name) in valid_field_names.iter().enumerate() {
-                        if i > 0 {
-                            variant_classes_buffer.push_str(", ");
-                        }
-                        variant_classes_buffer.push_str(name);
-                    }
-                    
-                    variant_classes_buffer.push_str(")\n\n");
-                } else {
-                    // For empty variants or variants with only methods
-                    variant_classes_buffer.push_str("        return cls()\n\n");
-                }
-            }
-        }
-        
-        // 2. Now generate the main enum class
-        // Add the variant class definitions first
-        buffer.push_str("# Classes for complex enum variants\n");
-        buffer.push_str(&variant_classes_buffer);
-        
-        // Add the main enum class
-        buffer.push_str(&format!("# The main {} class\n", enum_name));
-        buffer.push_str(&format!("class {}(Enum):\n", enum_name));
-        
-        // Add variant declarations - keep only the correct format (without TypedDict)
-        for variant_name in &variant_names {
-            if variant_name.contains("TypedDict") {
-                continue;
-            }
-            // Determine if this is a simple or complex variant
-            let is_complex = variant_classes.iter().any(|vc| vc.contains(&format!("{}_{}", enum_name, variant_name)));
-            
-            if is_complex {
-                buffer.push_str(&format!("    {} = {}_{}  # Complex variant with fields\n", variant_name, enum_name, variant_name));
-            } else {
-                buffer.push_str(&format!("    {} = auto()\n", variant_name));
-            }
-        }
-        
         buffer.push_str("\n");
         
-        // Add toJSON method
-        buffer.push_str("    def toJSON(self) -> str:\n");
-        buffer.push_str("        \"\"\"Serialize this object to a JSON string\"\"\"\n");
-        buffer.push_str("        return json.dumps(self._serialize())\n\n");
-        
-        // Add _serialize method
-        buffer.push_str("    def _serialize(self):\n");
-        buffer.push_str("        \"\"\"Convert this object to a serializable dictionary\"\"\"\n");
-        buffer.push_str("        # Complex enum serialization - the self is the Enum instance\n");
-        buffer.push_str("        if isinstance(self.value, (int, str, bool, float)):\n");
-        buffer.push_str("            return {\"type\": self.name}\n");
-        buffer.push_str("        \n");
-        buffer.push_str("        # If the value is a variant class, serialize it and add the type tag\n");
-        buffer.push_str("        if hasattr(self.value, '__dict__'):\n");
-        buffer.push_str("            # Start with the variant name\n");
-        buffer.push_str("            result = {\"type\": self.name}\n");
-        buffer.push_str("            \n");
-        buffer.push_str("            # Add all fields from the variant value\n");
-        buffer.push_str("            for key, value in self.value.__dict__.items():\n");
-        buffer.push_str("                # Skip private fields\n");
-        buffer.push_str("                if key.startswith('_'):\n");
-        buffer.push_str("                    continue\n");
-        buffer.push_str("                    \n");
-        buffer.push_str("                # Recursively serialize any nested objects\n");
-        buffer.push_str("                if hasattr(value, '_serialize'):\n");
-        buffer.push_str("                    result[key] = value._serialize()\n");
-        buffer.push_str("                elif isinstance(value, list):\n");
-        buffer.push_str("                    result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]\n");
-        buffer.push_str("                elif isinstance(value, dict):\n");
-        buffer.push_str("                    result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}\n");
-        buffer.push_str("                elif isinstance(value, Enum):\n");
-        buffer.push_str("                    result[key] = value.name\n");
-        buffer.push_str("                else:\n");
-        buffer.push_str("                    result[key] = value\n");
-        buffer.push_str("            return result\n");
-        buffer.push_str("        \n");
-        buffer.push_str("        # If it's a simple enum instance, just return the name\n");
-        buffer.push_str("        return {\"type\": self.name}\n\n");
-        
-        // Add fromJSON method
-        buffer.push_str("    @classmethod\n");
-        buffer.push_str("    def fromJSON(cls, json_str):\n");
-        buffer.push_str("        \"\"\"Deserialize JSON string to a new instance\"\"\"\n");
-        buffer.push_str("        data = json.loads(json_str)\n");
-        buffer.push_str("        return cls.fromDict(data)\n\n");
-        
-        // Add fromDict method
-        buffer.push_str("    @classmethod\n");
-        buffer.push_str("    def fromDict(cls, data):\n");
-        buffer.push_str("        \"\"\"Create a complex enum instance from a dictionary\"\"\"\n");
-        buffer.push_str("        if isinstance(data, dict):\n");
-        buffer.push_str("            # Complex enum with fields\n");
-        buffer.push_str("            if \"type\" in data:\n");
-        buffer.push_str("                variant_name = data[\"type\"]\n");
-        buffer.push_str("                # Find the enum variant by name\n");
-        buffer.push_str("                try:\n");
-        buffer.push_str("                    variant = cls[variant_name]\n");
-        buffer.push_str("                    \n");
-        buffer.push_str("                    # If the variant value is a class, get a new instance\n");
-        buffer.push_str("                    if hasattr(variant.value, 'fromDict'):\n");
-        buffer.push_str("                        # Create data object from the dictionary (excluding the type field)\n");
-        buffer.push_str("                        variant_data = {k: v for k, v in data.items() if k != \"type\"}\n");
-        buffer.push_str("                        return variant.value.fromDict(variant_data)\n");
-        buffer.push_str("                    \n");
-        buffer.push_str("                    return variant\n");
-        buffer.push_str("                except (KeyError, ValueError):\n");
-        buffer.push_str("                    # Use the helper method if direct lookup fails\n");
-        buffer.push_str("                    variant_data = {k: v for k, v in data.items() if k != \"type\"}\n");
-        buffer.push_str("                    return cls.create_variant(variant_name, **variant_data)\n");
-        buffer.push_str("        elif isinstance(data, str):\n");
-        buffer.push_str("            # Simple enum name\n");
-        buffer.push_str("            try:\n");
-        buffer.push_str("                return cls[data]  # Get enum by name\n");
-        buffer.push_str("            except (KeyError, ValueError):\n");
-        buffer.push_str("                pass\n");
-        buffer.push_str("        # Default fallback\n");
-        buffer.push_str("        return next(iter(cls))\n\n");
-        
-        // Add the create_variant helper method
-        buffer.push_str("    @classmethod\n");
-        buffer.push_str("    def create_variant(cls, variant_name, **kwargs):\n");
-        buffer.push_str("        \"\"\"Helper method to create a variant with associated data\"\"\"\n");
-        buffer.push_str("        # Find the correct variant\n");
-        buffer.push_str("        # Only process valid variant names that exist in the enum\n");
-        buffer.push_str("        try:\n");
-        buffer.push_str("            # First try direct lookup by name (most efficient)\n");
-        buffer.push_str("            variant = cls[variant_name]\n");
-        buffer.push_str("            \n");
-        buffer.push_str("            # Special handling for specific variant types\n");
-
-        // Then, for the variant handling code, filter the variants more strictly:
-        for variant_name in &variant_names {
-            // Skip variants that aren't valid Python identifiers or might be code fragments
-            if !is_valid_python_identifier(variant_name) || 
-               variant_name.contains(".") || 
-               variant_name.contains("_serialize") || 
-               variant_name.contains("toJSON") || 
-               variant_name.contains("fromDict") || 
-               variant_name.contains("variant") || 
-               variant_name.contains("data") {
-                continue;
-            }
-            
-            buffer.push_str(&format!("            if variant.name == \"{}\":\n", variant_name));
-            buffer.push_str(&format!("                try:\n"));
-            buffer.push_str(&format!("                    return {}_{}.fromDict(kwargs)\n", enum_name, variant_name));
-            buffer.push_str(&format!("                except Exception:\n"));
-            buffer.push_str(&format!("                    return variant  # Fallback to simple variant\n"));
+    // 5. Add the actual definition code 
+    // We trust the definition from T::definition() is mostly complete.
+    // Remove any duplicate boilerplate imports that might be in the definition string.
+    let mut final_definition_lines = Vec::new();
+    for line in definition.lines() { // Use definition
+        let trimmed_line = line.trim();
+        // Remove redundant imports/setup already added to the buffer
+        if !(trimmed_line.starts_with("from __future__ import") ||
+             trimmed_line.starts_with("from typing import") || 
+             trimmed_line.starts_with("from enum import") || 
+             trimmed_line.starts_with("import json") ||
+             trimmed_line.starts_with("import sys") ||
+             trimmed_line.starts_with("from pathlib import") ||
+             trimmed_line.starts_with("from dataclasses import") ||
+             trimmed_line.contains("_current_file = Path") || // Basic check for path setup
+             trimmed_line.starts_with("if TYPE_CHECKING:") ||
+             trimmed_line.starts_with("# Forward references") ||
+             trimmed_line.starts_with("# Add current directory"))
+        {
+            final_definition_lines.push(line);
         }
-
-        buffer.push_str("            # If we didn't find a specific handler, just return the variant\n");
-        buffer.push_str("            return variant\n");
-        buffer.push_str("        except (KeyError, ValueError):\n");
-        buffer.push_str("            # If not found, return the first variant as a fallback\n");
-        buffer.push_str("            return next(iter(cls))\n");
     }
-    // For regular classes/dataclasses (now TypedDict)
-    else {
-        // Note: __init__ is not needed for TypedDict
-        
-        // Add toJSON method (Assuming it's part of the macro-generated class_def now)
-        // If methods were NOT included in the macro output, add them here:
-        /* 
-        buffer.push_str("    def toJSON(self) -> str:\n");
-        buffer.push_str("        \"\"\"Serialize this TypedDict to a JSON string\"\"\"\n");
-        buffer.push_str("        return json.dumps(self._serialize())\n\n");
-        
-        buffer.push_str("    def _serialize(self):
-");
-        buffer.push_str("        \"\"\"Convert this TypedDict to a serializable dictionary\"\"\"\n");
-        buffer.push_str("        result = {}\n");
-        buffer.push_str("        for key, value in self.items():\n");
-        buffer.push_str("            if hasattr(value, '_serialize'):\n");
-        buffer.push_str("                result[key] = value._serialize()\n");
-        buffer.push_str("            elif isinstance(value, list):\n");
-        buffer.push_str("                result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]\n");
-        buffer.push_str("            elif isinstance(value, dict):\n");
-        buffer.push_str("                result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}\n");
-        buffer.push_str("            elif hasattr(value, 'toJSON') and callable(getattr(value, 'toJSON')):\n");
-        buffer.push_str("                result[key] = json.loads(value.toJSON())\n");
-        buffer.push_str("            elif isinstance(value, Enum):\n");
-        buffer.push_str("                result[key] = value.name\n");
-        buffer.push_str("            else:\n");
-        buffer.push_str("                result[key] = value\n");
-        buffer.push_str("        return result\n\n");
-        
-        buffer.push_str("    @classmethod\n");
-        buffer.push_str("    def fromJSON(cls, json_str):\n");
-        buffer.push_str("        \"\"\"Deserialize JSON string to a dictionary\"\"\"\n");
-        buffer.push_str("        data = json.loads(json_str)\n");
-        buffer.push_str("        return data\n\n");
-        
-        buffer.push_str("    @classmethod\n");
-        buffer.push_str("    def fromDict(cls, data):\n");
-        buffer.push_str("        \"\"\"Create a dictionary from another dictionary\"\"\"\n");
-        buffer.push_str("        return data.copy()\n");
-        */
+    // Add a newline before the definition if the buffer doesn't end with one
+    if !buffer.ends_with("\n\n") {
+         if !buffer.ends_with("\n") { buffer.push('\n'); }
+         buffer.push('\n');
     }
+    buffer.push_str(&final_definition_lines.join("\n"));
     
     // Ensure the directory exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
     }
-    
-    // Write the Python code to file
-    let mut file = std::fs::File::create(&path)?;
-    std::io::Write::write_all(&mut file, buffer.as_bytes())?;
-    
+
+    // Write the final buffer to the file
+    std::fs::write(&path, buffer)?;
     Ok(())
 }
-
 
 /// Export all Python types starting from a root type
 fn export_all_into<T: Py + ?Sized + 'static>(
@@ -1546,170 +708,265 @@ fn export_to_string<T: Py + ?Sized + 'static>() -> Result<String, ExportError> {
     Ok(T::decl_concrete())
 }
 
-// Basic implementations for primitive types
-macro_rules! impl_py_primitives {
-    ($($($ty:ty),* => $l:literal),*) => { $($(
-        impl Py for $ty {
+// ------------- Primitives ------------- 
+// Generic implementation for primitives
+macro_rules! impl_py_primitive { 
+    ($($ty:ty => $py:expr),* $(,)?) => {
+        $(impl Py for $ty {
             type WithoutGenerics = Self;
             type OptionInnerType = Self;
-            fn name() -> String { $l.to_owned() }
-            fn inline() -> String { <Self as $crate::Py>::name() }
-            fn inline_flattened() -> String { panic!("{} cannot be flattened", <Self as $crate::Py>::name()) }
-            fn decl() -> String { panic!("{} cannot be declared", <Self as $crate::Py>::name()) }
-            fn decl_concrete() -> String { panic!("{} cannot be declared", <Self as $crate::Py>::name()) }
-        }
-    )*)* };
+            fn name() -> String { $py.to_owned() }
+            fn inline() -> String { $py.to_owned() }
+            fn inline_flattened() -> String { panic!("Primitive type {} cannot be flattened", Self::name()) }
+            fn decl() -> String { panic!("Primitive type {} cannot be declared", Self::name()) }
+            fn decl_concrete() -> String { panic!("Primitive type {} cannot be declared", Self::name()) }
+            fn definition() -> String { panic!("Primitive type {} cannot provide a definition", Self::name()) }
+        })*
+    };
 }
 
-// Add implementations for Uuid and NaiveDateTime
-#[cfg(feature = "chrono")]
-impl Py for chrono::NaiveDateTime {
+impl_py_primitive! {
+    u8 => "int", i8 => "int", u16 => "int", i16 => "int", u32 => "int", i32 => "int", 
+    usize => "int", isize => "int", 
+    f32 => "float", f64 => "float", // Use float for f32/f64
+    u64 => "int", i64 => "int", u128 => "int", i128 => "int",
+    bool => "bool",
+    char => "str", String => "str", str => "str",
+}
+
+// ------------- Dummy Type ------------- 
+// Used as placeholder for generics
+impl Py for crate::Dummy {
     type WithoutGenerics = Self;
     type OptionInnerType = Self;
-    fn name() -> String { "NaiveDateTime".to_owned() }
-    fn inline() -> String { "NaiveDateTime".to_owned() }
-    fn inline_flattened() -> String { panic!("{} cannot be flattened", "NaiveDateTime".to_owned()) }
-    fn decl() -> String { panic!("{} cannot be declared", "NaiveDateTime".to_owned()) }
-    fn decl_concrete() -> String { panic!("{} cannot be declared", "NaiveDateTime".to_owned()) }
+    fn name() -> String { "Dummy".to_owned() }
+    fn inline() -> String { "Dummy".to_owned() } 
+    fn inline_flattened() -> String { panic!("Dummy type cannot be flattened") }
+    fn decl() -> String { panic!("Dummy type cannot be declared") }
+    fn decl_concrete() -> String { panic!("Dummy type cannot be declared") }
+    fn definition() -> String { panic!("Dummy type cannot provide a definition") }
 }
 
-#[cfg(feature = "uuid")]
-impl Py for uuid::Uuid {
+// ------------- chrono ------------- 
+#[cfg(feature = "chrono-impl")]
+mod chrono_impl {
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime, DateTime, Utc};
+    use crate::py::Py;
+    use crate::py::PyTypeVisitor;
+    
+    // Macro to implement Py for chrono types that map directly
+    macro_rules! impl_py_chrono { 
+        ($ty:ty, $py_name:expr) => {
+            impl Py for $ty {
+                type WithoutGenerics = Self;
+                type OptionInnerType = Self;
+                fn name() -> String { $py_name.to_owned() }
+                fn inline() -> String { $py_name.to_owned() }
+                fn inline_flattened() -> String { panic!("{} cannot be flattened", $py_name) }
+                fn decl() -> String { panic!("{} cannot be declared", $py_name) }
+                fn decl_concrete() -> String { panic!("{} cannot be declared", $py_name) }
+                fn definition() -> String { panic!("{} cannot provide a definition, use Python's {} directly", $py_name, $py_name) }
+            }
+        };
+    }
+
+    impl_py_chrono!(NaiveDateTime, "datetime");
+    impl_py_chrono!(NaiveDate, "date");
+    impl_py_chrono!(NaiveTime, "time");
+    impl_py_chrono!(DateTime<Utc>, "datetime"); // Map to Python datetime
+}
+
+// ------------- uuid ------------- 
+#[cfg(feature = "uuid-impl")]
+mod uuid_impl {
+    use uuid::Uuid;
+    use crate::py::Py;
+    
+    impl Py for Uuid {
     type WithoutGenerics = Self;
     type OptionInnerType = Self;
     fn name() -> String { "Uuid".to_owned() }
     fn inline() -> String { "Uuid".to_owned() }
     fn inline_flattened() -> String { "Uuid".to_owned() }
-    fn decl() -> String { "import json\n\nclass Uuid:\n    def __init__(self, value: str = \"\"):\n        self.value = value\n\n    def __str__(self) -> str:\n        return self.value\n        \n    def toJSON(self) -> str:\n        return json.dumps(str(self))\n        \n    @classmethod\n    def fromJSON(cls, json_str):\n        \"\"\"Deserialize JSON string to a Uuid instance\"\"\"\n        data = json.loads(json_str)\n        return cls(data)\n        \n    @classmethod\n    def fromDict(cls, data):\n        \"\"\"Create a Uuid from a string\"\"\"\n        if isinstance(data, str):\n            return cls(data)\n        return cls(str(data))".to_owned() }
+        fn decl() -> String { 
+            // Return the custom Python class definition for UUID
+            r#"
+import json
+from uuid import UUID as _Uuid
+
+# Wrapper to provide consistent JSON methods
+class Uuid:
+    def __init__(self, value: str | _Uuid = ""):
+        if isinstance(value, _Uuid):
+            self._uuid = value
+        else:
+            self._uuid = _Uuid(value)
+
+    def __str__(self) -> str:
+        return str(self._uuid)
+        
+    def toJSON(self) -> str:
+        return json.dumps(str(self))
+        
+    @classmethod
+    def fromJSON(cls, json_str):
+        # Assumes json_str contains just the UUID string
+        data = json.loads(json_str)
+        return cls(data)
+        
+    @classmethod
+    def fromDict(cls, data):
+        # Handles string or existing Uuid object
+        if isinstance(data, str):
+            return cls(data)
+        elif isinstance(data, _Uuid):
+             return cls(data)
+        elif isinstance(data, cls): # Handle case where it's already our Uuid type
+             return data
+        return cls(str(data)) # Fallback
+
+    # Allow access to the underlying uuid object if needed
+    @property
+    def raw_uuid(self) -> _Uuid:
+        return self._uuid
+            "#.trim().to_owned() 
+        }
     fn decl_concrete() -> String { <Self as Py>::decl() }
+        fn definition() -> String { <Self as Py>::decl() }
+    }
 }
 
-// Implementation for HashMap
-impl<K: Py, V: Py> Py for std::collections::HashMap<K, V> {
+// ------------- Containers ------------- 
+
+impl<K, V> Py for std::collections::HashMap<K, V>
+where
+    K: Py + 'static,
+    V: Py + 'static,
+{
     type WithoutGenerics = std::collections::HashMap<crate::Dummy, crate::Dummy>;
     type OptionInnerType = Self;
 
     fn ident() -> String {
         "Dict".to_owned()
     }
-
     fn name() -> String {
-        format!("Dict[{}, {}]", <K as crate::Py>::name(), <V as crate::Py>::name())
+        format!("Dict[{}, {}]", K::name(), V::name())
     }
-
     fn inline() -> String {
-        format!("Dict[{}, {}]", <K as crate::Py>::inline(), <V as crate::Py>::inline())
+        format!("Dict[{}, {}]", K::inline(), V::inline())
     }
-
     fn visit_dependencies(v: &mut impl PyTypeVisitor)
     where
         Self: 'static,
     {
-        <K as crate::Py>::visit_dependencies(v);
-        <V as crate::Py>::visit_dependencies(v);
+        v.visit::<K>();
+        v.visit::<V>();
     }
-
     fn visit_generics(v: &mut impl PyTypeVisitor)
     where
         Self: 'static,
     {
-        <K as crate::Py>::visit_generics(v);
-        <V as crate::Py>::visit_generics(v);
+        K::visit_generics(v);
+        V::visit_generics(v);
+    }
+    fn decl() -> String {
+        format!("Dict[{}, {}]", K::decl(), V::decl())
+    }
+    fn decl_concrete() -> String {
+        format!("Dict[{}, {}]", K::decl_concrete(), V::decl_concrete())
+    }
+    fn inline_flattened() -> String {
+        panic!("HashMap cannot be flattened")
+    }
+    fn definition() -> String { panic!("HashMap cannot provide a definition, use Dict[...] directly") }
+}
+
+// Similar implementation for BTreeMap
+impl<K, V> Py for std::collections::BTreeMap<K, V> 
+where 
+    K: Py + Ord + 'static, 
+    V: Py + 'static 
+{
+    type WithoutGenerics = std::collections::BTreeMap<crate::Dummy, crate::Dummy>;
+    type OptionInnerType = Self;
+
+    fn ident() -> String { "Dict".to_owned() }
+    fn name() -> String { format!("Dict[{}, {}]", K::name(), V::name()) }
+    fn inline() -> String { format!("Dict[{}, {}]", K::inline(), V::inline()) }
+    fn visit_dependencies(v: &mut impl PyTypeVisitor) where Self: 'static {
         v.visit::<K>();
         v.visit::<V>();
     }
-
-    fn decl() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
+    fn visit_generics(v: &mut impl PyTypeVisitor) where Self: 'static {
+        K::visit_generics(v);
+        V::visit_generics(v);
     }
-
-    fn decl_concrete() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
-    }
-
-    fn inline_flattened() -> String {
-        panic!("{} cannot be flattened", <Self as crate::Py>::name())
-    }
+    fn decl() -> String { format!("Dict[{}, {}]", K::decl(), V::decl()) }
+    fn decl_concrete() -> String { format!("Dict[{}, {}]", K::decl_concrete(), V::decl_concrete()) }
+    fn inline_flattened() -> String { panic!("BTreeMap cannot be flattened") }
+    fn definition() -> String { panic!("BTreeMap cannot provide a definition, use Dict[...] directly") }
 }
 
-// Implement for primitive types
-impl_py_primitives! {
-    u8, i8, u16, i16, u32, i32, usize, isize, f32, f64 => "int",
-    u64, i64, u128, i128 => "int",
-    bool => "bool",
-    char, String, str => "str",
-    () => "None"
-}
-
-// Implementation for Option<T>
+// Option<T>
 impl<T: Py> Py for Option<T> {
     type WithoutGenerics = Self;
     type OptionInnerType = T;
     const IS_OPTION: bool = true;
 
     fn name() -> String {
-        format!("Optional[{}]", <T as crate::Py>::name())
+        format!("Optional[{}]", T::name())
     }
-
     fn inline() -> String {
-        format!("Optional[{}]", <T as crate::Py>::inline())
+        format!("Optional[{}]", T::inline())
     }
-
     fn visit_dependencies(v: &mut impl PyTypeVisitor)
     where
         Self: 'static,
     {
-        <T as crate::Py>::visit_dependencies(v);
+        v.visit::<T>();
     }
-
     fn visit_generics(v: &mut impl PyTypeVisitor)
     where
         Self: 'static,
     {
-        <T as crate::Py>::visit_generics(v);
-        v.visit::<T>();
+        T::visit_generics(v);
     }
-
     fn decl() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
+        format!("Optional[{}]", T::decl())
     }
-
     fn decl_concrete() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
+        format!("Optional[{}]", T::decl_concrete())
     }
-
     fn inline_flattened() -> String {
-        panic!("{} cannot be flattened", <Self as crate::Py>::name())
+        T::inline_flattened()
     }
+    fn definition() -> String { panic!("Option cannot provide a definition, use Optional[...] directly") }
 }
 
-// Add implementation for Dummy
-impl Py for crate::Dummy {
+// () - None
+impl Py for () {
     type WithoutGenerics = Self;
     type OptionInnerType = Self;
     
     fn name() -> String {
-        "Dummy".to_owned()
+        "None".to_owned()
     }
-    
     fn decl() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
+        "None".to_owned()
     }
-    
     fn decl_concrete() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
+        "None".to_owned()
     }
-    
     fn inline() -> String {
-        panic!("{} cannot be inlined", <Self as crate::Py>::name())
+        "None".to_owned()
     }
-    
     fn inline_flattened() -> String {
-        panic!("{} cannot be flattened", <Self as crate::Py>::name())
+        panic!("() cannot be flattened")
     }
+    fn definition() -> String { panic!("() cannot provide a definition, use None directly") }
 }
 
-// Implementation for Vec<T>
+// Vec<T>
 impl<T: Py> Py for Vec<T> {
     type WithoutGenerics = Vec<crate::Dummy>;
     type OptionInnerType = Self;
@@ -1717,136 +974,106 @@ impl<T: Py> Py for Vec<T> {
     fn ident() -> String {
         "List".to_owned()
     }
-
     fn name() -> String {
-        format!("List[{}]", <T as crate::Py>::name())
+        format!("List[{}]", T::name())
     }
-
     fn inline() -> String {
-        format!("List[{}]", <T as crate::Py>::inline())
+        format!("List[{}]", T::inline())
     }
-
     fn visit_dependencies(v: &mut impl PyTypeVisitor)
     where
         Self: 'static,
     {
-        <T as crate::Py>::visit_dependencies(v);
+        v.visit::<T>();
     }
-
     fn visit_generics(v: &mut impl PyTypeVisitor)
     where
         Self: 'static,
     {
-        <T as crate::Py>::visit_generics(v);
+        T::visit_generics(v);
+    }
+    fn decl() -> String {
+        format!("List[{}]", T::decl())
+    }
+    fn decl_concrete() -> String {
+        format!("List[{}]", T::decl_concrete())
+    }
+    fn inline_flattened() -> String {
+        panic!("Vec cannot be flattened")
+    }
+    fn definition() -> String { panic!("Vec cannot provide a definition, use List[...] directly") }
+}
+
+// Generic impl for Tuples up to size 16
+macro_rules! impl_py_tuple {
+    ( $($ty:ident),* ) => {
+        impl<$($ty: Py + 'static),*> Py for ($($ty,)*) {
+            type WithoutGenerics = Self; // Assuming generics handled within components
+            type OptionInnerType = Self;
+
+            fn name() -> String {
+                format!("Tuple[{}]", [$($ty::name()),*].join(", "))
+            }
+            fn inline() -> String {
+                 format!("Tuple[{}]", [$($ty::inline()),*].join(", "))
+            }
+            fn decl() -> String {
+                format!("Tuple[{}]", [$($ty::decl()),*].join(", "))
+            }
+            fn decl_concrete() -> String {
+                format!("Tuple[{}]", [$($ty::decl_concrete()),*].join(", "))
+            }
+            fn visit_dependencies(v: &mut impl PyTypeVisitor) where Self: 'static {
+                $(v.visit::<$ty>();)*
+            }
+            fn visit_generics(v: &mut impl PyTypeVisitor) where Self: 'static {
+                 $($ty::visit_generics(v);)*
+            }
+            fn inline_flattened() -> String {
+                panic!("Tuples cannot be flattened")
+            }
+            fn definition() -> String { panic!("Tuple cannot provide a definition, use Tuple[...] directly") }
+        }
+    };
+}
+
+// Implement for tuples of size 1 to 16
+impl_py_tuple!(T1);
+impl_py_tuple!(T1, T2);
+// ... up to T16 ...
+impl_py_tuple!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16);
+
+
+// Generic impl for Arrays up to size 32
+impl<T: Py + 'static, const N: usize> Py for [T; N] {
+    type WithoutGenerics = [crate::Dummy; N]; 
+    type OptionInnerType = Self;
+
+    fn name() -> String {
+        // Represent fixed-size arrays as Tuple[T, T, ..., T]
+        let type_names = std::iter::repeat(T::name()).take(N).collect::<Vec<_>>();
+        format!("Tuple[{}]", type_names.join(", "))
+    }
+    fn inline() -> String {
+        let type_inlines = std::iter::repeat(T::inline()).take(N).collect::<Vec<_>>();
+        format!("Tuple[{}]", type_inlines.join(", "))
+    }
+    fn decl() -> String {
+        let type_decls = std::iter::repeat(T::decl()).take(N).collect::<Vec<_>>();
+        format!("Tuple[{}]", type_decls.join(", "))
+    }
+    fn decl_concrete() -> String {
+        let type_decls_concrete = std::iter::repeat(T::decl_concrete()).take(N).collect::<Vec<_>>();
+        format!("Tuple[{}]", type_decls_concrete.join(", "))
+    }
+    fn visit_dependencies(v: &mut impl PyTypeVisitor) where Self: 'static {
         v.visit::<T>();
     }
-
-    fn decl() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
+    fn visit_generics(v: &mut impl PyTypeVisitor) where Self: 'static {
+         T::visit_generics(v);
     }
-
-    fn decl_concrete() -> String {
-        panic!("{} cannot be declared", <Self as crate::Py>::name())
-    }
-
     fn inline_flattened() -> String {
-        panic!("{} cannot be flattened", <Self as crate::Py>::name())
+        panic!("Arrays cannot be flattened")
     }
+     fn definition() -> String { panic!("Array cannot provide a definition, use Tuple[...] directly") }
 }
-
-// Add helper function to detect Python code fragments
-fn is_python_fragment(s: &str) -> bool {
-    // Check for common Python syntax patterns or keywords that are not valid field names
-    let code_fragments = [
-        " if ", "if ", " in ", "in ", " for ", "for ", " return ", "return ",
-        " elif ", "elif ", " else", "else ", " import ", "import ", " from ", "from ",
-        "(", ")", "[", "]", "{", "}", ":", ";", "->", "&", "==", "!=", ">=", "<=",
-        " def ", "def ", " class ", "class ", " try ", "try ", " except ", "except ",
-        " finally ", "finally ", " with ", "with ", " as ", "as ", " while ", "while ",
-        " assert ", "assert ", " pass ", "pass ", " lambda ", "lambda ", " or ", "or ",
-        " and ", "and ", " not ", "not ", " is ", "is ", " global ", "global ", " del ", "del ",
-        " yield ", "yield "
-    ];
-    
-    for fragment in code_fragments {
-        if s.contains(fragment) {
-            return true;
-        }
-    }
-    
-    false
-}
-
-// Add helper function to detect Python reserved keywords
-fn is_python_keyword(s: &str) -> bool {
-    let keywords = [
-        "False", "None", "True", "and", "as", "assert", "async", "await", 
-        "break", "class", "continue", "def", "del", "elif", "else", "except", 
-        "finally", "for", "from", "global", "if", "import", "in", "is", 
-        "lambda", "nonlocal", "not", "or", "pass", "raise", "return", 
-        "try", "while", "with", "yield"
-    ];
-    
-    keywords.contains(&s)
-}
-
-// Add a new function to check if a string is a valid Python identifier
-fn is_valid_python_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    
-    let first_char = s.chars().next().unwrap();
-    if !first_char.is_alphabetic() && first_char != '_' {
-        return false;
-    }
-    
-    // Check if all other characters are alphanumeric or underscore
-    s.chars().all(|c| c.is_alphanumeric() || c == '_') && 
-    // Make sure it's not a Python keyword
-    !is_python_keyword(s) && 
-    // Make sure it doesn't contain code fragments
-    !is_python_fragment(s)
-}
-
-// Find where field declarations are processed in variant class definitions
-// This is likely when building the cleaned_decl from the original declaration
-// Create a helper function to clean up excessive newlines in field declarations
-
-// Add this function to normalize field spacing
-fn normalize_field_spacing(content: &str) -> String {
-    let mut result = String::new();
-    let mut last_was_field = false;
-    let mut consecutive_newlines = 0;
-    
-    for line in content.lines() {
-        let is_field_decl = line.trim().contains(':') && 
-                           !line.trim().starts_with("class") && 
-                           !line.trim().starts_with("def ") && 
-                           !line.trim().starts_with('#');
-        
-        if line.trim().is_empty() {
-            consecutive_newlines += 1;
-            // Only add a newline if we don't already have too many consecutive ones
-            if consecutive_newlines <= 1 || !last_was_field {
-                result.push_str(line);
-                result.push('\n');
-            }
-        } else {
-            consecutive_newlines = 0;
-            result.push_str(line);
-            result.push('\n');
-            last_was_field = is_field_decl;
-        }
-    }
-    
-    result
-}
-
-// Then use this function when processing the class definition
-// Find the place where we create the class definition string
-// And wrap it with the normalize_field_spacing function
-
-// Modify this line:
-// let cleaned_decl = cleaned_lines.join("\n");
-// to:
