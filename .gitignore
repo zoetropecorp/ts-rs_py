@@ -4,3 +4,6 @@ target/
 tsconfig.json
 
 /ts-rs/tests-out
+.DS_Store
+
+example/py_bindings/*

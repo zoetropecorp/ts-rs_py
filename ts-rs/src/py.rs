@@ -1,6 +1,7 @@
 use std::{
     any::TypeId,
     path::{Path, PathBuf},
+    collections::HashSet, // Add HashSet import
 };
 
 pub use crate::export::ExportError;
@@ -335,6 +336,9 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     let mut buffer = String::with_capacity(1024);
     let decl = T::decl_concrete();
     
+    // Insert the definition on the line *before* `let mut imports = ...`
+    let target_class_name = T::ident(); // Get the name of the class being exported
+    
     // Create a set of imports that are actually needed based on the declaration
     let mut imports = std::collections::HashSet::new();
     
@@ -390,22 +394,16 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         seen_types.insert("NaiveDateTime".to_string()); // Prevent double import
     }
     
-    // More thorough extraction of type dependencies from the entire declaration
-    // First collect all lines of the declaration
-    let decl_lines: Vec<&str> = decl.lines().collect();
-    
-    // Scan the entire declaration for custom type references
-    // This is more comprehensive than just looking at specific patterns
+    // Scan the entire declaration text to find custom type references
     let standard_types = ["int", "str", "bool", "float", "None", "List", "Dict", "Optional", 
                          "Union", "Any", "Enum", "auto", "dataclass", "Type", "TypeVar", 
-                         "Generic", "TYPE_CHECKING", "Self"];
+                         "Generic", "TYPE_CHECKING", "Self", "Path", "Path("];
     
-    // Process the entire declaration text to find custom type references
-    for line in &decl_lines {
+    for line in decl.lines() {
         let line = line.trim();
         
-        // Skip comments
-        if line.starts_with("#") {
+        // Skip comments and method definitions
+        if line.starts_with("#") || line.starts_with("def ") {
             continue;
         }
         
@@ -420,7 +418,11 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                    && !type_name.contains("(") && !type_name.contains("{") && !type_name.contains("[") {
                     let type_string = type_name.to_string();
                     
-                    if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) {
+                    // *** Check before inserting: Skip if type is defined in this file ***
+                    if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) &&
+                       type_string != target_class_name && 
+                       !type_string.starts_with(&format!("{}_", target_class_name)) // Skip variants like Command_Move
+                    {
                         seen_types.insert(type_string.clone());
                         imports.insert(format!("from {} import {}", type_string, type_string));
                     }
@@ -465,8 +467,11 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                     if !part.is_empty() && part.chars().next().unwrap().is_uppercase() {
                         let part_string = part.to_string();
                         
-                        // Skip standard library types and types we've already seen
-                        if !seen_types.contains(&part_string) && !standard_types.contains(&part) {
+                        // *** Check before inserting: Skip if type is defined in this file ***
+                        if !seen_types.contains(&part_string) && !standard_types.contains(&part) &&
+                           part_string != target_class_name &&
+                           !part_string.starts_with(&format!("{}_", target_class_name)) // Skip variants
+                        {
                             seen_types.insert(part_string.clone());
                             imports.insert(format!("from {} import {}", part_string, part_string));
                         }
@@ -477,18 +482,33 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         
         // Scan for special field patterns that might contain type references
         // Handle tuple fields (field_0: Type)
-        if line.contains("field_") && line.contains(':') {
+        if line.contains("field_") && line.contains(':') && !line.contains("def ") {
             let field_parts: Vec<&str> = line.split(':').collect();
             if field_parts.len() >= 2 {
-                let type_part = field_parts[1].trim();
-                let type_name = type_part.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+                let field_name = field_parts[0].trim();
                 
-                if !type_name.is_empty() && type_name.chars().next().unwrap().is_uppercase() {
-                    let type_string = type_name.to_string();
+                // Skip if field looks like a Python code fragment
+                if !field_name.is_empty() && 
+                   !field_name.contains("(") && !field_name.contains(")") &&
+                   !field_name.contains(" if ") && !field_name.contains(" for ") && 
+                   !field_name.contains(" in ") && !field_name.contains(" return ") &&
+                   !field_name.contains(" elif ") && !field_name.contains(" else") &&
+                   !is_python_fragment(field_name) {
+                   
+                    let type_part = field_parts[1].trim();
+                    let type_name = type_part.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
                     
-                    if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) {
-                        seen_types.insert(type_string.clone());
-                        imports.insert(format!("from {} import {}", type_string, type_string));
+                    if !type_name.is_empty() && type_name.chars().next().unwrap().is_uppercase() {
+                        let type_string = type_name.to_string();
+                        
+                        // *** Check before inserting: Skip if type is defined in this file ***
+                        if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) &&
+                           type_string != target_class_name &&
+                           !type_string.starts_with(&format!("{}_", target_class_name)) // Skip variants
+                        {
+                            seen_types.insert(type_string.clone());
+                            imports.insert(format!("from {} import {}", type_string, type_string));
+                        }
                     }
                 }
             }
@@ -497,7 +517,8 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         // Handle named fields like "nested" that often reference other types
         for field_name in ["nested", "inner", "data", "value", "content"] {
             let field_pattern = format!("{}: ", field_name);
-            if line.contains(&field_pattern) {
+            // Skip if this is a function definition
+            if line.contains(&field_pattern) && !line.contains("def ") {
                 if let Some(pos) = line.find(&field_pattern) {
                     let type_part = &line[pos + field_pattern.len()..].trim();
                     let type_name = type_part.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
@@ -505,7 +526,11 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                     if !type_name.is_empty() && type_name.chars().next().unwrap().is_uppercase() {
                         let type_string = type_name.to_string();
                         
-                        if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) {
+                        // *** Check before inserting: Skip if type is defined in this file ***
+                        if !seen_types.contains(&type_string) && !standard_types.contains(&type_name) &&
+                           type_string != target_class_name &&
+                           !type_string.starts_with(&format!("{}_", target_class_name)) // Skip variants
+                        {
                             seen_types.insert(type_string.clone());
                             imports.insert(format!("from {} import {}", type_string, type_string));
                         }
@@ -527,8 +552,11 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                 // it's likely a variant class reference like ComplexEnum_VariantName
                 if !prefix.is_empty() && prefix.chars().next().unwrap().is_uppercase() 
                    && !standard_types.contains(&prefix) && !seen_types.contains(prefix) {
-                    seen_types.insert(prefix.to_string());
-                    imports.insert(format!("from {} import {}", prefix, prefix));
+                    // *** Check before inserting: Skip if prefix matches target class name ***
+                    if prefix != target_class_name { 
+                        seen_types.insert(prefix.to_string());
+                        imports.insert(format!("from {} import {}", prefix, prefix));
+                    }
                 }
             }
         }
@@ -554,20 +582,34 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     buffer.push_str("if str(_current_dir) not in sys.path:\n");
     buffer.push_str("    sys.path.append(str(_current_dir))\n\n");
     
-    // Adding type checking block
+    // 3. Add type checking block
     buffer.push_str("# Forward references for type checking only\n");
     buffer.push_str("if TYPE_CHECKING:\n");
     
-    // 4. Add custom imports that aren't from standard library
-    for import in &imports {
-        // Skip standard library imports as we've added them above
+    // Add collected custom imports under TYPE_CHECKING to avoid circular imports
+    let mut custom_imports = Vec::new();
+    // Use the original `imports` set directly
+    for import in &imports { 
         if !import.starts_with("from typing import") && 
            !import.starts_with("from enum import") && 
            !import.starts_with("from dataclasses import") &&
+           !import.starts_with("from pathlib import") &&
            import != "import json" {
-            buffer.push_str(import);
-            buffer.push('\n');
+            // Fix malformed imports
+            if import.contains("from Path(") || import.contains("import Path(") {
+                continue; // Skip malformed Path imports
+            }
+            custom_imports.push(format!("    {}", import));
         }
+    }
+    
+    if !custom_imports.is_empty() {
+        custom_imports.sort(); // Sort for consistent output
+        for import_stmt in custom_imports {
+            buffer.push_str(&format!("{}\n", import_stmt));
+        }
+    } else {
+        buffer.push_str("    pass  # Type checking imports will be used via annotations\n");
     }
     buffer.push_str("\n");
     
@@ -614,7 +656,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         cleaned_lines.push(line);
     }
     
-    let cleaned_decl = cleaned_lines.join("\n");
+    let cleaned_decl = normalize_field_spacing(&cleaned_lines.join("\n"));
     
     // We do the following steps to clean up the code:
     // 1. Extract the class definition (first occurrence only)
@@ -712,13 +754,39 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     buffer.push_str("# Forward references for type checking only\n");
     buffer.push_str("if TYPE_CHECKING:\n");
     
+    // Filter out imports for the class itself or its variants defined in the same file
+    let target_class_name = T::ident();
+    let mut filtered_imports = imports.clone(); // Clone to allow modification
+    
+    imports.iter().for_each(|import_stmt| {
+        // Expected format: "from Module import Class"
+        let parts: Vec<&str> = import_stmt.split_whitespace().collect();
+        if parts.len() >= 4 && parts[0] == "from" && parts[2] == "import" {
+            let module_name = parts[1];
+            let class_name = parts[3]; // Class name might be different if aliased, but usually same
+            
+            // Check if module name matches the target class or a variant pattern
+            if module_name == target_class_name || class_name == target_class_name ||
+               (module_name.starts_with(&format!("{}_", target_class_name)) && class_name.starts_with(&format!("{}_", target_class_name)))
+            {
+                filtered_imports.remove(import_stmt);
+            }
+        }
+    });
+    
     // Add collected custom imports under TYPE_CHECKING to avoid circular imports
     let mut custom_imports = Vec::new();
-    for import in &imports {
+    // Use the filtered set now
+    for import in &filtered_imports {
         if !import.starts_with("from typing import") && 
            !import.starts_with("from enum import") && 
            !import.starts_with("from dataclasses import") &&
+           !import.starts_with("from pathlib import") &&
            import != "import json" {
+            // Fix malformed imports
+            if import.contains("from Path(") || import.contains("import Path(") {
+                continue; // Skip malformed Path imports
+            }
             custom_imports.push(format!("    {}", import));
         }
     }
@@ -738,8 +806,10 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     let mut fields = Vec::new();
     let mut inside_class = false;
     let mut class_indent = ""; // Remember the indentation of the class
-    
-    for line in clean_buffer.lines() {
+    let target_class_name = T::ident(); // Get the name of the class we are exporting
+    let mut is_target_class = false; // Track if we are currently inside the target class
+
+    for line in clean_buffer.lines() { // clean_buffer comes from cleaned_decl
         if line.trim().starts_with("class ") {
             // Start of a class definition
             if let Some(class_pos) = line.find("class") {
@@ -747,35 +817,51 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                     class_indent = &line[0..class_pos];
                 }
             }
-            inside_class = true;
-            class_def.push_str(line);
-            class_def.push('\n');
-        } else if inside_class && !line.trim().is_empty() {
-            // Skip any method definitions, we'll add our own
+            // Determine the name of the class defined on this line
+            let current_class_name = line.trim().split(&[' ', '(', ':'][..]).nth(1).unwrap_or("");
+            if !is_target_class && current_class_name == target_class_name {
+                // Found the target class definition
+                is_target_class = true; // We are now inside the target class
+                inside_class = true;
+                class_def.push_str(line); // Start accumulating its definition
+                class_def.push_str("\n"); // Corrected: use double quotes for string literal
+            } else {
+                // If we encounter another class (or already passed the target), stop processing for fields
+                is_target_class = false;
+                inside_class = false; // Treat as outside relevant class scope for field collection
+                // We still need to include other class definitions in the final output later,
+                // but we don't collect their fields for the main class methods.
+            }
+        } else if is_target_class && !line.trim().is_empty() { // Only process lines if inside the target class
+            // Skip any method definitions, we'll add our own later
             if !line.trim().starts_with("def ") && !line.trim().starts_with("@") {
-                class_def.push_str(line);
-                class_def.push('\n');
-                
-                // Extract field declarations for later construction of __init__
-                if line.contains(":") && !line.contains("class") && !line.trim().starts_with("#") {
+                class_def.push_str(line); // Accumulate non-method lines for the target class
+                class_def.push_str("\n"); // Corrected: use double quotes for string literal
+
+                // Extract field declarations ONLY from the target class
+                if line.contains(":") && !line.contains("class") && !line.trim().starts_with("#") && !line.trim().starts_with("def ") {
+                    // Make sure this is a valid field declaration and not a fragment of method code
                     let parts: Vec<&str> = line.trim().split(':').collect();
                     if parts.len() >= 2 {
                         let field_name = parts[0].trim();
-                        if !field_name.is_empty() {
-                            fields.push(field_name.to_string());
+                        // Skip if field looks like a Python code fragment or keyword
+                        if !field_name.is_empty() &&
+                           !field_name.contains("(") && !field_name.contains(")") &&
+                           !field_name.contains(" if ") && !field_name.contains(" for ") &&
+                           !field_name.contains(" in ") && !field_name.contains(" return ") &&
+                           !field_name.contains(" elif ") && !field_name.contains(" else") &&
+                           !is_python_fragment(field_name) && !is_python_keyword(field_name) {
+                            fields.push(field_name.to_string()); // <<< Only push fields for the target class
                         }
                     }
                 }
-            }
-        } else if inside_class && line.trim().is_empty() {
-            // Keep empty lines
-            class_def.push('\n');
+             }
+        } else if is_target_class && line.trim().is_empty() { // Keep empty lines within the target class def
+            class_def.push_str("\n"); // Corrected: use double quotes for string literal
         } else if !inside_class {
-            // For non-class content, look for imports only
-            if line.trim().starts_with("from ") || line.trim().starts_with("import ") {
-                buffer.push_str(line);
-                buffer.push('\n');
-            }
+            // For non-class content (outside the target class scope we just defined), handle imports etc. if needed
+            // This part might need adjustment depending on overall structure, but the key is `fields` is now correct.
+            // For now, assume other content is handled elsewhere or doesn't affect field collection.
         }
     }
     
@@ -835,6 +921,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         let mut is_collecting_variant = false;
         let mut current_variant_data = String::new();
         let mut current_variant_name = String::new();
+        let mut current_class_fields = HashSet::new(); // Track fields we've seen for the current class
         
         // Parse the declaration to find variant class definitions
         for line in cleaned_decl.lines() {
@@ -844,6 +931,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
             if trimmed.starts_with("class") && line.contains("_") && !is_collecting_variant {
                 is_collecting_variant = true;
                 current_variant_data = format!("{}\n", line);
+                current_class_fields.clear(); // Clear fields when starting a new class
                 
                 // Extract variant name from class name
                 if let Some(class_start) = trimmed.find("class ") {
@@ -867,6 +955,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                     is_collecting_variant = false;
                     variant_classes.push(current_variant_data.clone());
                     current_variant_data.clear();
+                    current_class_fields.clear(); // Clear fields at the end of a class
                     
                     // Start collecting the new class immediately if it's a variant
                     if trimmed.starts_with("class") && line.contains("_") {
@@ -886,8 +975,26 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                         }
                     }
                 } else {
-                    // Continue collecting this variant's data
-                    current_variant_data.push_str(&format!("{}\n", line));
+                    // Process field declarations to avoid duplicate fields
+                    if trimmed.contains(":") && !trimmed.starts_with("class") && !trimmed.starts_with("#") && !trimmed.starts_with("def ") {
+                        let parts: Vec<&str> = trimmed.split(':').collect();
+                        if parts.len() >= 2 {
+                            let field_name = parts[0].trim();
+                            
+                            // Only add if we haven't seen this field for the current class
+                            if !current_class_fields.contains(field_name) {
+                                current_class_fields.insert(field_name.to_string());
+                                // Add the line to the variant data
+                                current_variant_data.push_str(&format!("{}\n", line));
+                            }
+                        } else {
+                            // Add non-field line
+                            current_variant_data.push_str(&format!("{}\n", line));
+                        }
+                    } else {
+                        // Add non-field line
+                        current_variant_data.push_str(&format!("{}\n", line));
+                    }
                 }
             }
             
@@ -902,7 +1009,18 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                 let parts: Vec<&str> = trimmed.split('=').collect();
                 if parts.len() >= 2 {
                     let variant_name = parts[0].trim();
-                    if !variant_name.is_empty() && !variant_names.contains(&variant_name.to_string()) {
+                    // Only add valid Python identifiers, not keywords or fragments
+                    if !variant_name.is_empty() && 
+                        !variant_names.contains(&variant_name.to_string()) &&
+                        !is_python_keyword(variant_name) && 
+                        !is_python_fragment(variant_name) &&
+                        // Exclude fragments that look like code
+                        !variant_name.contains(".") &&
+                        !variant_name.contains("_serialize") &&
+                        !variant_name.contains("toJSON") &&
+                        !variant_name.contains("fromDict") &&
+                        !variant_name.contains("data") &&
+                        !variant_name.contains("variant") {
                         variant_names.push(variant_name.to_string());
                     }
                 }
@@ -929,13 +1047,18 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                 let line = line.trim();
                 
                 // Look for field definitions like "foo: str"
-                if line.contains(":") && !line.starts_with("class") && !line.starts_with("#") {
+                if line.contains(":") && !line.starts_with("class") && !line.starts_with("#") && !line.starts_with("def ") {
                     let parts: Vec<&str> = line.split(':').collect();
                     if parts.len() >= 2 {
                         let field_name = parts[0].trim();
                         let field_type = parts[1].trim();
                         
-                        if !field_name.is_empty() {
+                        if !field_name.is_empty() && 
+                           !field_name.contains("(") && !field_name.contains(")") &&
+                           !field_name.contains(" if ") && !field_name.contains(" for ") && 
+                           !field_name.contains(" in ") && !field_name.contains(" return ") &&
+                           !field_name.contains(" elif ") && !field_name.contains(" else") &&
+                           !is_python_fragment(field_name) && !is_python_keyword(field_name) {
                             field_names.push(field_name.to_string());
                             field_types.push(field_type.to_string());
                         }
@@ -964,26 +1087,42 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                 
                 // Add field definitions
                 for (i, (name, type_)) in field_names.iter().zip(field_types.iter()).enumerate() {
+                    // Skip method definitions that were incorrectly parsed as fields
+                    if name.starts_with("def ") {
+                        continue;
+                    }
                     variant_classes_buffer.push_str(&format!("    {}: {}\n", name, type_));
                 }
                 
-                if field_names.is_empty() {
+                if field_names.is_empty() || field_names.iter().all(|name| name.starts_with("def ")) {
                     variant_classes_buffer.push_str("    pass\n");
                 }
                 
                 // Add constructor
-                if !field_names.is_empty() {
+                let valid_field_names: Vec<_> = field_names.iter()
+                    .filter(|name| {
+                        !name.starts_with("def ") &&
+                        !name.contains("(") && !name.contains(")") &&
+                        !name.contains(" if ") && !name.contains(" for ") && 
+                        !name.contains(" in ") && !name.contains(" return ") &&
+                        !name.contains(" elif ") && !name.contains(" else") &&
+                        !is_python_fragment(name) &&
+                        !is_python_keyword(name)
+                    })
+                    .collect();
+
+                if !valid_field_names.is_empty() {
                     variant_classes_buffer.push_str("\n    def __init__(self");
                     
-                    // Add parameters with type hints
-                    for (i, (name, type_)) in field_names.iter().zip(field_types.iter()).enumerate() {
+                    // Add parameters with type hints - only include actual fields
+                    for name in &valid_field_names {
                         variant_classes_buffer.push_str(&format!(", {}", name));
                     }
                     
                     variant_classes_buffer.push_str("):\n");
                     
-                    // Add field assignments
-                    for name in &field_names {
+                    // Add field assignments - only include actual fields
+                    for name in &valid_field_names {
                         variant_classes_buffer.push_str(&format!("        self.{} = {}\n", name, name));
                     }
                 }
@@ -1020,7 +1159,34 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                 variant_classes_buffer.push_str("        \"\"\"Create an instance from a dictionary\"\"\"\n");
                 
                 if !field_names.is_empty() {
-                    for (i, (name, type_)) in field_names.iter().zip(field_types.iter()).enumerate() {
+                    // Filter out any fields that look like code fragments
+                    let valid_field_names: Vec<_> = field_names.iter()
+                        .filter(|name| {
+                            !name.starts_with("def ") &&
+                            !name.contains("(") && !name.contains(")") &&
+                            !name.contains(" if ") && !name.contains(" for ") && 
+                            !name.contains(" in ") && !name.contains(" return ") &&
+                            !name.contains(" elif ") && !name.contains(" else") &&
+                            !is_python_fragment(name) &&
+                            !is_python_keyword(name)
+                        })
+                        .collect();
+                    
+                    let valid_field_types: Vec<_> = field_names.iter()
+                        .zip(field_types.iter())
+                        .filter(|(name, _)| {
+                            !name.starts_with("def ") &&
+                            !name.contains("(") && !name.contains(")") &&
+                            !name.contains(" if ") && !name.contains(" for ") && 
+                            !name.contains(" in ") && !name.contains(" return ") &&
+                            !name.contains(" elif ") && !name.contains(" else") &&
+                            !is_python_fragment(name) &&
+                            !is_python_keyword(name)
+                        })
+                        .map(|(_, typ)| typ)
+                        .collect();
+                    
+                    for (i, (name, type_)) in valid_field_names.iter().zip(valid_field_types.iter()).enumerate() {
                         let stripped_type = type_.split('[').next().unwrap_or("").trim();
                         
                         // Add import for the appropriate type - needs to be delayed to execution time
@@ -1049,10 +1215,20 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
                         }
                     }
                     
-                    let args = field_names.join(", ");
-                    variant_classes_buffer.push_str(&format!("        return cls({})\n\n", args));
+                    // Filter out method definitions from the generated code
+                    variant_classes_buffer.push_str("        # Filter out method definitions and only pass actual field values\n");
+                    variant_classes_buffer.push_str("        return cls(");
+                    
+                    for (i, name) in valid_field_names.iter().enumerate() {
+                        if i > 0 {
+                            variant_classes_buffer.push_str(", ");
+                        }
+                        variant_classes_buffer.push_str(name);
+                    }
+                    
+                    variant_classes_buffer.push_str(")\n\n");
                 } else {
-                    // For empty variants
+                    // For empty variants or variants with only methods
                     variant_classes_buffer.push_str("        return cls()\n\n");
                 }
             }
@@ -1164,32 +1340,55 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         buffer.push_str("    def create_variant(cls, variant_name, **kwargs):\n");
         buffer.push_str("        \"\"\"Helper method to create a variant with associated data\"\"\"\n");
         buffer.push_str("        # Find the correct variant\n");
-        buffer.push_str("        for variant in cls:\n");
-        buffer.push_str("            if variant.name.lower() == variant_name.lower():\n");
-        
-        // Add variant creation code for each variant
+        buffer.push_str("        # Only process valid variant names that exist in the enum\n");
+        buffer.push_str("        try:\n");
+        buffer.push_str("            # First try direct lookup by name (most efficient)\n");
+        buffer.push_str("            variant = cls[variant_name]\n");
+        buffer.push_str("            \n");
+        buffer.push_str("            # Special handling for specific variant types\n");
+
+        // Then, for the variant handling code, filter the variants more strictly:
         for variant_name in &variant_names {
-            buffer.push_str(&format!("                if variant.name == \"{}\":\n", variant_name));
-            buffer.push_str(&format!("                    try:\n"));
-            buffer.push_str(&format!("                        return {}_{}.fromDict(kwargs)\n", enum_name, variant_name));
-            buffer.push_str(&format!("                    except Exception:\n"));
-            buffer.push_str(&format!("                        return variant  # Fallback to simple variant\n"));
+            // Skip variants that aren't valid Python identifiers or might be code fragments
+            if !is_valid_python_identifier(variant_name) || 
+               variant_name.contains(".") || 
+               variant_name.contains("_serialize") || 
+               variant_name.contains("toJSON") || 
+               variant_name.contains("fromDict") || 
+               variant_name.contains("variant") || 
+               variant_name.contains("data") {
+                continue;
+            }
+            
+            buffer.push_str(&format!("            if variant.name == \"{}\":\n", variant_name));
+            buffer.push_str(&format!("                try:\n"));
+            buffer.push_str(&format!("                    return {}_{}.fromDict(kwargs)\n", enum_name, variant_name));
+            buffer.push_str(&format!("                except Exception:\n"));
+            buffer.push_str(&format!("                    return variant  # Fallback to simple variant\n"));
         }
-        
-        buffer.push_str("        # If not found, return the first variant as a fallback\n");
-        buffer.push_str("        return next(iter(cls))\n");
+
+        buffer.push_str("            # If we didn't find a specific handler, just return the variant\n");
+        buffer.push_str("            return variant\n");
+        buffer.push_str("        except (KeyError, ValueError):\n");
+        buffer.push_str("            # If not found, return the first variant as a fallback\n");
+        buffer.push_str("            return next(iter(cls))\n");
     }
     // For regular classes/dataclasses
     else {
         // Add __init__ method if the class has fields and no custom __init__ already detected
-        if !fields.is_empty() {
-            let params = fields.join(", ");
+        // Filter out any method definitions
+        let valid_fields: Vec<_> = fields.iter()
+            .filter(|field| !field.starts_with("def "))
+            .collect();
+
+        if !valid_fields.is_empty() {
+            let params = valid_fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
             buffer.push_str("\n    def __init__(self, ");
             buffer.push_str(&params);
             buffer.push_str("):\n");
             
             // Add field assignments
-            for field in &fields {
+            for field in &valid_fields {
                 buffer.push_str(&format!("        self.{} = {}\n", field, field));
             }
             buffer.push_str("\n");
@@ -1236,9 +1435,14 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         buffer.push_str("    def fromDict(cls, data):\n");
         buffer.push_str("        \"\"\"Create an instance from a dictionary\"\"\"\n");
         
-        if !fields.is_empty() {
+        // Filter out any method definitions
+        let valid_fields: Vec<_> = fields.iter()
+            .filter(|field| !field.starts_with("def "))
+            .collect();
+
+        if !valid_fields.is_empty() {
             // Generate parameter extraction code for fields
-            for field in &fields {
+            for field in &valid_fields {
                 buffer.push_str(&format!("        if '{}' in data:\n", field));
                 buffer.push_str(&format!("            {} = data['{}']\n", field, field));
                 buffer.push_str(&format!("            # Handle nested objects based on type\n"));
@@ -1253,7 +1457,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
             }
             
             // Create the instance with the processed fields
-            buffer.push_str(&format!("        return cls({})\n", fields.join(", ")));
+            buffer.push_str(&format!("        return cls({})\n", valid_fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
         } else {
             // Generic constructor for classes without fields
             buffer.push_str("        # Create instance with all attributes from the data dictionary\n");
@@ -1577,3 +1781,100 @@ impl<T: Py> Py for Vec<T> {
         panic!("{} cannot be flattened", <Self as crate::Py>::name())
     }
 }
+
+// Add helper function to detect Python code fragments
+fn is_python_fragment(s: &str) -> bool {
+    // Check for common Python syntax patterns or keywords that are not valid field names
+    let code_fragments = [
+        " if ", "if ", " in ", "in ", " for ", "for ", " return ", "return ",
+        " elif ", "elif ", " else", "else ", " import ", "import ", " from ", "from ",
+        "(", ")", "[", "]", "{", "}", ":", ";", "->", "&", "==", "!=", ">=", "<=",
+        " def ", "def ", " class ", "class ", " try ", "try ", " except ", "except ",
+        " finally ", "finally ", " with ", "with ", " as ", "as ", " while ", "while ",
+        " assert ", "assert ", " pass ", "pass ", " lambda ", "lambda ", " or ", "or ",
+        " and ", "and ", " not ", "not ", " is ", "is ", " global ", "global ", " del ", "del ",
+        " yield ", "yield "
+    ];
+    
+    for fragment in code_fragments {
+        if s.contains(fragment) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+// Add helper function to detect Python reserved keywords
+fn is_python_keyword(s: &str) -> bool {
+    let keywords = [
+        "False", "None", "True", "and", "as", "assert", "async", "await", 
+        "break", "class", "continue", "def", "del", "elif", "else", "except", 
+        "finally", "for", "from", "global", "if", "import", "in", "is", 
+        "lambda", "nonlocal", "not", "or", "pass", "raise", "return", 
+        "try", "while", "with", "yield"
+    ];
+    
+    keywords.contains(&s)
+}
+
+// Add a new function to check if a string is a valid Python identifier
+fn is_valid_python_identifier(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    
+    let first_char = s.chars().next().unwrap();
+    if !first_char.is_alphabetic() && first_char != '_' {
+        return false;
+    }
+    
+    // Check if all other characters are alphanumeric or underscore
+    s.chars().all(|c| c.is_alphanumeric() || c == '_') && 
+    // Make sure it's not a Python keyword
+    !is_python_keyword(s) && 
+    // Make sure it doesn't contain code fragments
+    !is_python_fragment(s)
+}
+
+// Find where field declarations are processed in variant class definitions
+// This is likely when building the cleaned_decl from the original declaration
+// Create a helper function to clean up excessive newlines in field declarations
+
+// Add this function to normalize field spacing
+fn normalize_field_spacing(content: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_field = false;
+    let mut consecutive_newlines = 0;
+    
+    for line in content.lines() {
+        let is_field_decl = line.trim().contains(':') && 
+                           !line.trim().starts_with("class") && 
+                           !line.trim().starts_with("def ") && 
+                           !line.trim().starts_with('#');
+        
+        if line.trim().is_empty() {
+            consecutive_newlines += 1;
+            // Only add a newline if we don't already have too many consecutive ones
+            if consecutive_newlines <= 1 || !last_was_field {
+                result.push_str(line);
+                result.push('\n');
+            }
+        } else {
+            consecutive_newlines = 0;
+            result.push_str(line);
+            result.push('\n');
+            last_was_field = is_field_decl;
+        }
+    }
+    
+    result
+}
+
+// Then use this function when processing the class definition
+// Find the place where we create the class definition string
+// And wrap it with the normalize_field_spacing function
+
+// Modify this line:
+// let cleaned_decl = cleaned_lines.join("\n");
+// to:

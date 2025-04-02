@@ -453,6 +453,12 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
             
             for f in &fields.named {
                 if let Some(field_name) = &f.ident {
+                    // Skip Python keywords and code fragments
+                    let field_name_str = field_name.to_string();
+                    if is_python_keyword(&field_name_str) || is_python_fragment(&field_name_str) {
+                        continue;
+                    }
+                    
                     // Get field type for type annotation
                     let field_type = match get_py_type_for_rust_type(&f.ty) {
                         Ok(py_type) => py_type,
@@ -486,8 +492,6 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
                         // For any non-path types, add them to dependencies
                         dependencies.append_from(&f.ty);
                     }
-                    
-                    let field_name_str = field_name.to_string();
                     
                     // Add field type annotation
                     annotations.push(format!("    {}: {}", field_name_str, field_type));
@@ -561,7 +565,7 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     imports.push("    pass  # Type checking imports will use annotations".to_string());
     
     // Construct header
-    let import_block = imports.join("\n");
+    let import_block = imports.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
     let mut py_class = format!("{}\n\nclass {}:\n{}\n", 
         import_block,
         class_name,
@@ -632,7 +636,7 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     }
     
     // Create the instance with the processed fields
-    let constructor_args = field_names.join(", ");
+    let constructor_args = field_names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
     py_class.push_str(&format!("        return cls({})\n", constructor_args));
     
     Ok(DerivedPy {
@@ -723,6 +727,67 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
     let crate_rename: Path = parse_quote!(::ts_rs);
     let mut dependencies = Dependencies::new(crate_rename.clone());
     
+    // Loop through variants to collect dependencies from fields
+    for v in &e.variants {
+        match &v.fields {
+            syn::Fields::Named(fields) => {
+                for f in &fields.named {
+                    let ty = &f.ty;
+                    if let syn::Type::Path(type_path) = ty {
+                        if let Some(last_segment) = type_path.path.segments.last() {
+                            let type_name = last_segment.ident.to_string();
+                            match type_name.as_str() {
+                                "Option" | "Vec" | "Dict" => {
+                                    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                                        for arg in &args.args {
+                                            if let syn::GenericArgument::Type(inner_type) = arg {
+                                                dependencies.push(inner_type);
+                                            }
+                                        }
+                                    }
+                                },
+                                _ if !is_primitive_type(&type_name) => {
+                                    dependencies.push(ty);
+                                },
+                                _ => {}
+                            }
+                        }
+                    } else {
+                        dependencies.append_from(ty);
+                    }
+                }
+            }
+            syn::Fields::Unnamed(fields) => {
+                for f in &fields.unnamed {
+                    let ty = &f.ty;
+                    if let syn::Type::Path(type_path) = ty {
+                        if let Some(last_segment) = type_path.path.segments.last() {
+                            let type_name = last_segment.ident.to_string();
+                            match type_name.as_str() {
+                                "Option" | "Vec" | "Dict" => {
+                                    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                                        for arg in &args.args {
+                                            if let syn::GenericArgument::Type(inner_type) = arg {
+                                                dependencies.push(inner_type);
+                                            }
+                                        }
+                                    }
+                                },
+                                _ if !is_primitive_type(&type_name) => {
+                                    dependencies.push(ty);
+                                },
+                                _ => {}
+                            }
+                        }
+                    } else {
+                        dependencies.append_from(ty);
+                    }
+                }
+            }
+            syn::Fields::Unit => {}
+        }
+    }
+    
     // Generate variant declarations for the enum
     let enum_name = e.ident.to_string();
     
@@ -762,52 +827,43 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
     imports.push("".to_string());
     
     // Join and add to the generated code
-    let import_block = imports.join("\n");
+    let import_block = imports.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
     generated_code.push_str(&import_block);
     generated_code.push_str("\n\n");
     
     // Generate dataclasses for variants with fields
     for variant in &e.variants {
+        // Get variant name
+        let variant_name = variant.ident.to_string();
+        
+        // Skip if the variant name is a Python keyword or code fragment
+        if is_python_keyword(&variant_name) || is_python_fragment(&variant_name) {
+            continue;
+        }
+        
         match &variant.fields {
             syn::Fields::Named(fields) => {
                 // Generate a dataclass for this variant
-                let variant_class_name = format!("{}_{}", enum_name, variant.ident);
+                let variant_class_name = format!("{}_{}", enum_name, variant_name);
                 
                 // Build field definitions
-                let fields_defs = fields.named.iter().map(|f| {
-                    let field_name = f.ident.as_ref().unwrap().to_string();
-                    let field_type = match get_py_type_for_rust_type(&f.ty) {
-                        Ok(py_type) => py_type,
-                        Err(_) => "Any".to_string()
-                    };
-                    
-                    // Add field types to dependencies
-                    if let syn::Type::Path(type_path) = &f.ty {
-                        if let Some(last_segment) = type_path.path.segments.last() {
-                            let type_name = last_segment.ident.to_string();
-                            
-                            match type_name.as_str() {
-                                "Option" | "Vec" => {
-                                    // For container types, extract the inner type
-                                    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                                        if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
-                                            dependencies.push(inner_type);
-                                        }
-                                    }
-                                },
-                                _ if !is_primitive_type(&type_name) => {
-                                    // For non-primitive types, add them directly
-                                    dependencies.push(&f.ty);
-                                },
-                                _ => {} // Skip primitive types
-                            }
+                let fields_defs = fields.named.iter()
+                    .filter_map(|f| {
+                        let field_name = f.ident.as_ref()?.to_string();
+                        // Skip Python keywords and fragments
+                        if is_python_keyword(&field_name) || is_python_fragment(&field_name) {
+                            return None;
                         }
-                    } else {
-                        dependencies.append_from(&f.ty);
-                    }
-                    
-                    format!("    {}: {}", field_name, field_type)
-                }).collect::<Vec<_>>().join("\n");
+                        
+                        let field_type = match get_py_type_for_rust_type(&f.ty) {
+                            Ok(py_type) => py_type,
+                            Err(_) => "Any".to_string()
+                        };
+                        
+                        Some(format!("    {}: {}", field_name, field_type))
+                    })
+                    .collect::<Vec<String>>()
+                    .join("\n"); // Single newline between fields
                 
                 // Add dataclass with toJSON method
                 let mut dataclass_code = format!("@dataclass\nclass {}:\n{}\n", 
@@ -868,7 +924,7 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 }
                 
                 // Create the instance with the processed fields
-                let constructor_args = field_names.join(", ");
+                let constructor_args = field_names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
                 dataclass_code.push_str(&format!("        return cls({})\n\n", constructor_args));
                 
                 generated_code.push_str(&dataclass_code);
@@ -885,11 +941,11 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                         Err(_) => "Any".to_string()
                     };
                     
-                    // Add field types to dependencies
+                    // Ensure dependency is added for tuple fields
                     dependencies.push(&f.ty);
                     
                     format!("    {}: {}", field_name, field_type)
-                }).collect::<Vec<_>>().join("\n");
+                }).collect::<Vec<String>>().join("\n");
                 
                 // Add dataclass with toJSON method
                 let mut dataclass_code = format!("@dataclass\nclass {}:\n{}\n", 
@@ -943,7 +999,10 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 // For each field by position
                 for i in 0..field_count {
                     let field_name = format!("field_{}", i);
-                    dataclass_code.push_str(&format!("            {} = data.get('{}', None)\n", field_name, field_name));
+                    // Skip if field looks like a Python code fragment
+                    if !is_python_fragment(&field_name) {
+                        dataclass_code.push_str(&format!("            {} = data.get('{}', None)\n", field_name, field_name));
+                    }
                 }
                 
                 // Create field list for constructor
@@ -963,19 +1022,25 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
     // Generate the enum class
     if has_complex_variants {
         // For complex enums, we'll use Union types to represent variants with fields
-        let variants_decl = e.variants.iter().map(|v| {
-            let variant_name = v.ident.to_string();
-            
-            match &v.fields {
-                syn::Fields::Unit => {
-                    format!("    {} = auto()", variant_name)
-                },
-                syn::Fields::Named(_) | syn::Fields::Unnamed(_) => {
-                    let variant_class_name = format!("{}_{}", enum_name, variant_name);
-                    format!("    {} = {}  # Complex variant with fields", variant_name, variant_class_name)
+        let variants_decl = e.variants.iter()
+            .filter(|v| {
+                // Filter out variants with invalid Python names
+                let variant_name = v.ident.to_string();
+                !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name)
+            })
+            .map(|v| {
+                let variant_name = v.ident.to_string();
+                
+                match &v.fields {
+                    syn::Fields::Unit => {
+                        format!("    {} = auto()", variant_name)
+                    },
+                    syn::Fields::Named(_) | syn::Fields::Unnamed(_) => {
+                        let variant_class_name = format!("{}_{}", enum_name, variant_name);
+                        format!("    {} = {}  # Complex variant with fields", variant_name, variant_class_name)
+                    }
                 }
-            }
-        }).collect::<Vec<_>>().join("\n");
+            }).collect::<Vec<_>>().join("\n");
         
         generated_code.push_str(&format!("class {}(Enum):\n{}\n", enum_name, variants_decl));
         
@@ -987,10 +1052,15 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
         generated_code.push_str("        for variant in cls:\n");
         generated_code.push_str("            if variant.name.lower() == variant_name.lower():\n");
         
-        // Add code to create variant instances
+        // Add code to create variant instances - with improved filtering
         for variant in &e.variants {
+            // Only process valid variants (not Python keywords or code fragments)
+            let variant_name = variant.ident.to_string();
+            if is_python_keyword(&variant_name) || is_python_fragment(&variant_name) {
+                continue; // Skip invalid variant names
+            }
+            
             if !matches!(variant.fields, syn::Fields::Unit) {
-                let variant_name = variant.ident.to_string();
                 let variant_class_name = format!("{}_{}", enum_name, variant_name);
                 
                 generated_code.push_str(&format!(
@@ -1039,10 +1109,16 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
         generated_code.push_str("        return next(iter(cls))\n");
         
     } else {
-        // Simple enum with just unit variants
-        let variants_code = e.variants.iter().enumerate().map(|(i, v)| {
-            format!("    {} = {}", v.ident, i + 1)
-        }).collect::<Vec<_>>().join("\n");
+        // Simple enum with just unit variants - improve filtering here
+        let variants_code = e.variants.iter().enumerate()
+            .filter(|(_, v)| {
+                let variant_name = v.ident.to_string();
+                // Make sure the variant name is a valid Python identifier
+                !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name)
+            })
+            .map(|(i, v)| {
+                format!("    {} = {}", v.ident, i + 1)
+            }).collect::<Vec<_>>().join("\n");
         
         generated_code.push_str(&format!("class {}(Enum):\n{}\n", enum_name, variants_code));
         
@@ -1091,4 +1167,40 @@ fn variant_name_to_snake_case(name: &str) -> String {
     }
     
     result
+}
+
+// Helper function to detect Python code fragments
+fn is_python_fragment(s: &str) -> bool {
+    // Check for common Python syntax patterns that are not valid field names
+    let code_fragments = [
+        " if ", "if ", " in ", "in ", " for ", "for ", " return ", "return ",
+        " elif ", "elif ", " else", "else ", " import ", "import ", " from ", "from ",
+        "(", ")", "[", "]", "{", "}", ":", ";", "->", "&", "==", "!=", ">=", "<=",
+        " def ", "def ", " class ", "class ", " try ", "try ", " except ", "except ",
+        " finally ", "finally ", " with ", "with ", " as ", "as ", " while ", "while ",
+        " assert ", "assert ", " pass ", "pass ", " lambda ", "lambda ", " or ", "or ",
+        " and ", "and ", " not ", "not ", " is ", "is ", " global ", "global ", " del ", "del ",
+        " yield ", "yield "
+    ];
+    
+    for fragment in code_fragments {
+        if s.contains(fragment) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+// Check if a string is a Python keyword
+fn is_python_keyword(s: &str) -> bool {
+    let keywords = [
+        "False", "None", "True", "and", "as", "assert", "async", "await", 
+        "break", "class", "continue", "def", "del", "elif", "else", "except", 
+        "finally", "for", "from", "global", "if", "import", "in", "is", 
+        "lambda", "nonlocal", "not", "or", "pass", "raise", "return", 
+        "try", "while", "with", "yield"
+    ];
+    
+    keywords.contains(&s)
 }
