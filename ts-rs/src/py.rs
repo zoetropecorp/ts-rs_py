@@ -502,7 +502,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     // 2. Standard library imports (ensure necessary ones are present)
     if definition.contains("json.") { buffer.push_str("import json\n"); }
     buffer.push_str("import sys\n");
-    if definition.contains("Path(") { buffer.push_str("from pathlib import Path\n"); }
+    buffer.push_str("from pathlib import Path\n");
     if definition.contains("(Enum)") || definition.contains("auto()") { buffer.push_str("from enum import Enum, auto\n"); }
     if definition.contains("@dataclass") { buffer.push_str("from dataclasses import *\n"); }
     
