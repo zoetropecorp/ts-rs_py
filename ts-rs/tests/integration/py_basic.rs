@@ -49,16 +49,16 @@ fn test_py_generation() {
     println!("{}", message_code);
     
     // Make sure the generated code has the expected structure for struct
-    assert!(user_code.contains("class User:"));
+    assert!(user_code.contains("class User(TypedDict):"));
     assert!(user_code.contains("id: int"));
     assert!(user_code.contains("name: str"));
     assert!(user_code.contains("email: str"));
     assert!(user_code.contains("active: bool"));
-    assert!(user_code.contains("def __init__(self, id: int, name: str, email: str, active: bool)"));
-    assert!(user_code.contains("self.id = id"));
-    assert!(user_code.contains("self.name = name"));
-    assert!(user_code.contains("self.email = email"));
-    assert!(user_code.contains("self.active = active"));
+    // assert!(user_code.contains("def __init__(self, id: int, name: str, email: str, active: bool)"));
+    // assert!(user_code.contains("self.id = id"));
+    // assert!(user_code.contains("self.name = name"));
+    // assert!(user_code.contains("self.email = email"));
+    // assert!(user_code.contains("self.active = active"));
     
     // Make sure the generated code has the expected structure for enum
     assert!(status_code.contains("from enum import Enum"));
@@ -102,7 +102,7 @@ fn test_py_generation() {
     let status_file = std::fs::read_to_string("./py_bindings_test/Status.py").unwrap();
     let message_file = std::fs::read_to_string("./py_bindings_test/Message.py").unwrap();
     
-    assert!(user_file.contains("class User:"));
+    assert!(user_file.contains("class User(TypedDict):"));
     assert!(status_file.contains("class Status(Enum)"));
     assert!(message_file.contains("class Message(Enum)"));
     assert!(message_file.contains("@dataclass"));

@@ -439,211 +439,106 @@ fn process_py_attribute(attr: &syn::Attribute, py: &mut DerivedPy) -> Result<()>
     Ok(())
 }
 
-// Placeholder functions - we'll implement these properly later
 fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     let crate_rename: Path = parse_quote!(::ts_rs);
     let mut dependencies = Dependencies::new(crate_rename.clone());
     
-    // Generate field declarations and type annotations for the struct
-    let (field_annotations, constructor_params, field_assignments) = match &s.fields {
+    // Generate field annotations
+    let field_annotations = match &s.fields {
         syn::Fields::Named(fields) => {
-            let mut annotations = Vec::new();
-            let mut params = Vec::new();
-            let mut assignments = Vec::new();
-            
-            for f in &fields.named {
-                if let Some(field_name) = &f.ident {
-                    // Skip Python keywords and code fragments
-                    let field_name_str = field_name.to_string();
-                    if is_python_keyword(&field_name_str) || is_python_fragment(&field_name_str) {
-                        continue;
-                    }
-                    
-                    // Get field type for type annotation
-                    let field_type = match get_py_type_for_rust_type(&f.ty) {
-                        Ok(py_type) => py_type,
-                        Err(_) => "Any".to_string() // Default to Any for unknown types
-                    };
-                    
-                    // Add this field's type to the dependencies
-                    // For container types like Option, Vec, etc. we need to extract the inner type
-                    if let syn::Type::Path(type_path) = &f.ty {
-                        if let Some(last_segment) = type_path.path.segments.last() {
-                            let type_name = last_segment.ident.to_string();
-                            
-                            match type_name.as_str() {
-                                "Option" | "Vec" => {
-                                    // For container types, we need to extract the inner type and add it
-                                    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                                        if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
-                                            // Add the inner type to dependencies
-                                            dependencies.push(inner_type);
-                                        }
-                                    }
-                                },
-                                _ if !is_primitive_type(&type_name) => {
-                                    // For non-primitive custom types, add them as dependencies
-                                    dependencies.push(&f.ty);
-                                },
-                                _ => {} // Skip primitive types
-                            }
-                        }
-                    } else {
-                        // For any non-path types, add them to dependencies
-                        dependencies.append_from(&f.ty);
-                    }
-                    
-                    // Add field type annotation
-                    annotations.push(format!("    {}: {}", field_name_str, field_type));
-                    
-                    // Add constructor parameter with type annotation
-                    params.push(format!("{}: {}", field_name_str, field_type));
-                    
-                    // Add field assignment in __init__ method
-                    assignments.push(format!("        self.{} = {}", field_name_str, field_name_str));
+            let annotations: Vec<_> = fields.named.iter().filter_map(|f| {
+                let field_name = f.ident.as_ref()?;
+                let field_name_str = field_name.to_string();
+                if is_python_keyword(&field_name_str) || is_python_fragment(&field_name_str) {
+                    return None;
                 }
-            }
-            
-            (
-                annotations.join("\n"),
-                params.join(", "),
-                if assignments.is_empty() {
-                    "        pass".to_string()
-                } else {
-                    assignments.join("\n")
-                }
-            )
+                let field_type = get_py_type_for_rust_type(&f.ty).unwrap_or_else(|_| "Any".to_string());
+                
+                // Add dependency (logic adapted from previous steps)
+                if let syn::Type::Path(type_path) = &f.ty {
+                     if let Some(last_segment) = type_path.path.segments.last() {
+                         let type_name = last_segment.ident.to_string();
+                         match type_name.as_str() {
+                             "Option" | "Vec" | "Dict" => {
+                                 if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                                     for arg in &args.args {
+                                         if let syn::GenericArgument::Type(inner_type) = arg {
+                                             dependencies.push(inner_type);
+                                         }
+                                     }
+                                 }
+                             },
+                             _ if !is_primitive_type(&type_name) => { dependencies.push(&f.ty); },
+                             _ => {}
+                         }
+                     }
+                } else { dependencies.append_from(&f.ty); }
+
+                Some(format!("    {}: {}", field_name_str, field_type))
+            }).collect();
+            annotations.join("\n")
         },
-        syn::Fields::Unnamed(fields) => {
-            // For tuple structs, we need to add fields to dependencies too
-            for field in &fields.unnamed {
-                dependencies.push(&field.ty);
-            }
-            
-            (
-                "    # Tuple struct fields (unnamed)".to_string(),
-                "*args".to_string(),
-                "        # Store args as is\n        self.args = args".to_string()
-            )
-        },
-        syn::Fields::Unit => (
-            "".to_string(),
-            "".to_string(),
-            "        pass  # Unit struct has no fields".to_string()
-        ),
+        syn::Fields::Unnamed(_) => "    # TypedDict does not support unnamed fields directly".to_string(),
+        syn::Fields::Unit => "    pass".to_string(),
     };
-    
-    // Construct the complete Python class with relative imports
+
     let class_name = s.ident.to_string();
-    
-    // Generate proper imports using TYPE_CHECKING to prevent circular imports
-    let mut imports = Vec::new();
-    
-    // Start with __future__ imports (these MUST be first in Python file)
-    imports.push("from __future__ import annotations".to_string());
-    imports.push("".to_string());
-    
-    // Standard library imports
-    imports.push("import json".to_string());
-    imports.push("import sys".to_string());
-    imports.push("from pathlib import Path".to_string());
-    imports.push("from enum import Enum".to_string());
-    imports.push("from typing import Any, Optional, List, Dict, Union, TYPE_CHECKING".to_string());
-    imports.push("".to_string());
-    
-    // Path handling for better imports
-    imports.push("# Add current directory to Python path to facilitate imports".to_string());
-    imports.push("_current_file = Path(__file__).resolve()".to_string());
-    imports.push("_current_dir = _current_file.parent".to_string());
-    imports.push("if str(_current_dir) not in sys.path:".to_string());
-    imports.push("    sys.path.append(str(_current_dir))".to_string());
-    imports.push("".to_string());
-    
-    // Add TYPE_CHECKING block for forward references
-    imports.push("# Forward references for type checking only".to_string());
-    imports.push("if TYPE_CHECKING:".to_string());
-    imports.push("    pass  # Type checking imports will use annotations".to_string());
-    
-    // Construct header
-    let import_block = imports.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
-    let mut py_class = format!("{}\n\nclass {}:\n{}\n", 
-        import_block,
-        class_name,
-        field_annotations
+
+    // Construct the entire class string in one go
+    let py_class_code = format!("\
+class {class_name}(TypedDict):
+{field_annotations}
+
+    # Note: Methods below adapted for TypedDict behavior.
+
+    def toJSON(self) -> str:
+        \"\"\"Serialize this TypedDict to a JSON string\"\"\"
+        return json.dumps(self._serialize())
+
+    def _serialize(self):
+        \"\"\"Convert this TypedDict to a serializable dictionary\"\"\"
+        result = {{}}
+        for key, value in self.items():
+            if hasattr(value, '_serialize'):
+                result[key] = value._serialize()
+            elif isinstance(value, list):
+                result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
+            elif isinstance(value, dict):
+                if hasattr(type(value), 'fromDict'):
+                    try:
+                        result[key] = value._serialize()
+                    except AttributeError:
+                         result[key] = {{k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}}
+                else:
+                    result[key] = {{k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}}
+            elif isinstance(value, Enum):
+                result[key] = value.name
+            else:
+                result[key] = value
+        return result
+
+    @classmethod
+    def fromJSON(cls, json_str):
+        \"\"\"Deserialize JSON string to a dictionary matching the TypedDict structure\"\"\"
+        data = json.loads(json_str)
+        # Caller is responsible for validation/type checking
+        return data
+
+    @classmethod
+    def fromDict(cls, data):
+        \"\"\"Create a dictionary matching the TypedDict structure from another dict\"\"\"
+        # Simplified: Return a copy. Caller responsible for validation/nested conversion.
+        return data.copy()
+",
+        class_name = class_name,
+        field_annotations = if field_annotations.is_empty() { "    pass".to_string() } else { field_annotations }
     );
-    
-    // Add constructor method
-    py_class.push_str(&format!("\n    def __init__(self, {}) -> None:\n{}\n", 
-        constructor_params,
-        field_assignments
-    ));
-    
-    // Add toJSON method for JSON serialization
-    py_class.push_str("\n    def toJSON(self) -> str:\n");
-    py_class.push_str("        def _serialize(obj):\n");
-    py_class.push_str("            if hasattr(obj, '__dict__'):\n");
-    py_class.push_str("                result = {}\n");
-    py_class.push_str("                for key, value in obj.__dict__.items():\n");
-    py_class.push_str("                    result[key] = _serialize(value)\n");
-    py_class.push_str("                return result\n");
-    py_class.push_str("            elif isinstance(obj, list):\n");
-    py_class.push_str("                return [_serialize(item) for item in obj]\n");
-    py_class.push_str("            elif isinstance(obj, dict):\n");
-    py_class.push_str("                return {k: _serialize(v) for k, v in obj.items()}\n");
-    py_class.push_str("            elif hasattr(obj, 'toJSON') and callable(getattr(obj, 'toJSON')):\n");
-    py_class.push_str("                return json.loads(obj.toJSON())\n");
-    py_class.push_str("            elif hasattr(obj, 'value') and isinstance(obj, Enum):\n");
-    py_class.push_str("                return obj.name\n");
-    py_class.push_str("            elif isinstance(obj, Enum):\n");
-    py_class.push_str("                return obj.name\n");
-    py_class.push_str("            return obj\n");
-    py_class.push_str("        return json.dumps(_serialize(self), indent=2)\n\n");
-    
-    // Add fromJSON class method for deserialization
-    py_class.push_str("    @classmethod\n");
-    py_class.push_str("    def fromJSON(cls, json_str):\n");
-    py_class.push_str("        \"\"\"Deserialize JSON string to a new instance\"\"\"\n");
-    py_class.push_str("        data = json.loads(json_str)\n");
-    py_class.push_str("        return cls.fromDict(data)\n\n");
-    
-    py_class.push_str("    @classmethod\n");
-    py_class.push_str("    def fromDict(cls, data):\n");
-    py_class.push_str("        \"\"\"Create an instance from a dictionary\"\"\"\n");
-    
-    // Extract field names for constructor parameters
-    let field_names: Vec<_> = match &s.fields {
-        syn::Fields::Named(fields) => {
-            fields.named.iter()
-                .filter_map(|f| f.ident.as_ref().map(|name| name.to_string()))
-                .collect()
-        },
-        _ => Vec::new()
-    };
-    
-    // Generate field processing code
-    for field in &field_names {
-        py_class.push_str(&format!("        if '{}' in data:\n", field));
-        py_class.push_str(&format!("            {} = data['{}']\n", field, field));
-        py_class.push_str(&format!("            # Handle nested objects based on type\n"));
-        py_class.push_str(&format!("            if isinstance({}, dict) and hasattr(cls, '_{}_type'):\n", field, field));
-        py_class.push_str(&format!("                {} = getattr(cls, '_{}_type').fromDict({})\n", field, field, field));
-        py_class.push_str(&format!("            elif isinstance({}, list) and hasattr(cls, '_item_type'):\n", field));
-        py_class.push_str("                item_type = getattr(cls, '_item_type')\n");
-        py_class.push_str(&format!("                if hasattr(item_type, 'fromDict'):\n"));
-        py_class.push_str(&format!("                    {} = [item_type.fromDict(item) if isinstance(item, dict) else item for item in {}]\n", field, field));
-        py_class.push_str(&format!("        else:\n"));
-        py_class.push_str(&format!("            {} = None\n", field));
-    }
-    
-    // Create the instance with the processed fields
-    let constructor_args = field_names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-    py_class.push_str(&format!("        return cls({})\n", constructor_args));
-    
+
     Ok(DerivedPy {
         crate_rename: crate_rename.clone(),
         py_name: s.ident.to_string(),
         docs: String::new(),
-        inline: quote!(#py_class.to_owned()),
+        inline: quote!(#py_class_code.to_owned()), // Use the formatted string
         inline_flattened: None,
         dependencies,
         concrete: HashMap::new(),
@@ -866,7 +761,7 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                     .join("\n"); // Single newline between fields
                 
                 // Add dataclass with toJSON method
-                let mut dataclass_code = format!("@dataclass\nclass {}:\n{}\n", 
+                let mut dataclass_code = format!("@dataclass\nclass {}(TypedDict):\n{}\n", 
                     variant_class_name, 
                     if fields_defs.is_empty() { "    pass" } else { &fields_defs }
                 );
@@ -948,7 +843,7 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 }).collect::<Vec<String>>().join("\n");
                 
                 // Add dataclass with toJSON method
-                let mut dataclass_code = format!("@dataclass\nclass {}:\n{}\n", 
+                let mut dataclass_code = format!("@dataclass\nclass {}(TypedDict):\n{}\n", 
                     variant_class_name, 
                     if fields_defs.is_empty() { "    pass" } else { &fields_defs }
                 );

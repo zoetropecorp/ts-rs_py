@@ -572,8 +572,8 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     buffer.push_str("import sys\n");
     buffer.push_str("from pathlib import Path\n");
     buffer.push_str("from enum import Enum, auto\n");
-    buffer.push_str("from typing import Any, Optional, List, Dict, Union, TYPE_CHECKING\n");
-    buffer.push_str("from dataclasses import dataclass\n");
+    buffer.push_str("from typing import Any, Optional, List, Dict, Union, TypedDict, TYPE_CHECKING\n");
+    buffer.push_str("from dataclasses import dataclass\n\n");
     
     // 3. Add path handling for imports
     buffer.push_str("\n# Add current directory to Python path to facilitate imports\n");
@@ -740,7 +740,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     buffer.push_str("import sys\n");
     buffer.push_str("from pathlib import Path\n");
     buffer.push_str("from enum import Enum, auto\n");
-    buffer.push_str("from typing import Any, Optional, List, Dict, Union, TYPE_CHECKING\n");
+    buffer.push_str("from typing import Any, Optional, List, Dict, Union, TypedDict, TYPE_CHECKING\n");
     buffer.push_str("from dataclasses import dataclass\n\n");
     
     // 2. Add path handling for imports
@@ -1373,42 +1373,22 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         buffer.push_str("            # If not found, return the first variant as a fallback\n");
         buffer.push_str("            return next(iter(cls))\n");
     }
-    // For regular classes/dataclasses
+    // For regular classes/dataclasses (now TypedDict)
     else {
-        // Add __init__ method if the class has fields and no custom __init__ already detected
-        // Filter out any method definitions
-        let valid_fields: Vec<_> = fields.iter()
-            .filter(|field| !field.starts_with("def "))
-            .collect();
-
-        if !valid_fields.is_empty() {
-            let params = valid_fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-            buffer.push_str("\n    def __init__(self, ");
-            buffer.push_str(&params);
-            buffer.push_str("):\n");
-            
-            // Add field assignments
-            for field in &valid_fields {
-                buffer.push_str(&format!("        self.{} = {}\n", field, field));
-            }
-            buffer.push_str("\n");
-        }
+        // Note: __init__ is not needed for TypedDict
         
-        // Add toJSON method
+        // Add toJSON method (Assuming it's part of the macro-generated class_def now)
+        // If methods were NOT included in the macro output, add them here:
+        /* 
         buffer.push_str("    def toJSON(self) -> str:\n");
-        buffer.push_str("        \"\"\"Serialize this object to a JSON string\"\"\"\n");
+        buffer.push_str("        \"\"\"Serialize this TypedDict to a JSON string\"\"\"\n");
         buffer.push_str("        return json.dumps(self._serialize())\n\n");
         
-        // Add _serialize method
-        buffer.push_str("    def _serialize(self):\n");
-        buffer.push_str("        \"\"\"Convert this object to a serializable dictionary\"\"\"\n");
+        buffer.push_str("    def _serialize(self):
+");
+        buffer.push_str("        \"\"\"Convert this TypedDict to a serializable dictionary\"\"\"\n");
         buffer.push_str("        result = {}\n");
-        buffer.push_str("        # Process all fields on this object\n");
-        buffer.push_str("        for key, value in self.__dict__.items():\n");
-        buffer.push_str("            # Skip private fields\n");
-        buffer.push_str("            if key.startswith('_'):\n");
-        buffer.push_str("                continue\n");
-        buffer.push_str("            # Recursively serialize any nested objects\n");
+        buffer.push_str("        for key, value in self.items():\n");
         buffer.push_str("            if hasattr(value, '_serialize'):\n");
         buffer.push_str("                result[key] = value._serialize()\n");
         buffer.push_str("            elif isinstance(value, list):\n");
@@ -1423,49 +1403,17 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         buffer.push_str("                result[key] = value\n");
         buffer.push_str("        return result\n\n");
         
-        // Add fromJSON class method
         buffer.push_str("    @classmethod\n");
         buffer.push_str("    def fromJSON(cls, json_str):\n");
-        buffer.push_str("        \"\"\"Deserialize JSON string to a new instance\"\"\"\n");
+        buffer.push_str("        \"\"\"Deserialize JSON string to a dictionary\"\"\"\n");
         buffer.push_str("        data = json.loads(json_str)\n");
-        buffer.push_str("        return cls.fromDict(data)\n\n");
+        buffer.push_str("        return data\n\n");
         
-        // Add fromDict class method
         buffer.push_str("    @classmethod\n");
         buffer.push_str("    def fromDict(cls, data):\n");
-        buffer.push_str("        \"\"\"Create an instance from a dictionary\"\"\"\n");
-        
-        // Filter out any method definitions
-        let valid_fields: Vec<_> = fields.iter()
-            .filter(|field| !field.starts_with("def "))
-            .collect();
-
-        if !valid_fields.is_empty() {
-            // Generate parameter extraction code for fields
-            for field in &valid_fields {
-                buffer.push_str(&format!("        if '{}' in data:\n", field));
-                buffer.push_str(&format!("            {} = data['{}']\n", field, field));
-                buffer.push_str(&format!("            # Handle nested objects based on type\n"));
-                buffer.push_str(&format!("            if isinstance({}, dict) and hasattr(cls, '_{}_type'):\n", field, field));
-                buffer.push_str(&format!("                {} = getattr(cls, '_{}_type').fromDict({})\n", field, field, field));
-                buffer.push_str(&format!("            elif isinstance({}, list) and hasattr(cls, '_item_type'):\n", field));
-                buffer.push_str(&format!("                item_type = getattr(cls, '_item_type')\n"));
-                buffer.push_str(&format!("                if hasattr(item_type, 'fromDict'):\n"));
-                buffer.push_str(&format!("                    {} = [item_type.fromDict(item) if isinstance(item, dict) else item for item in {}]\n", field, field));
-                buffer.push_str(&format!("        else:\n"));
-                buffer.push_str(&format!("            {} = None\n", field));
-            }
-            
-            // Create the instance with the processed fields
-            buffer.push_str(&format!("        return cls({})\n", valid_fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-        } else {
-            // Generic constructor for classes without fields
-            buffer.push_str("        # Create instance with all attributes from the data dictionary\n");
-            buffer.push_str("        instance = cls()\n");
-            buffer.push_str("        for key, value in data.items():\n");
-            buffer.push_str("            setattr(instance, key, value)\n");
-            buffer.push_str("        return instance\n");
-        }
+        buffer.push_str("        \"\"\"Create a dictionary from another dictionary\"\"\"\n");
+        buffer.push_str("        return data.copy()\n");
+        */
     }
     
     // Ensure the directory exists
