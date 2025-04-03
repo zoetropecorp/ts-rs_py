@@ -458,73 +458,6 @@ fn process_py_attribute(attr: &syn::Attribute, py: &mut DerivedPy) -> Result<()>
 // Helper functions for py_struct_def
 // ====================================
 
-// Helper to extract the inner type from Option<T>, Vec<T>, etc.
-fn get_inner_type(type_path: &syn::TypePath) -> Option<&syn::Type> {
-    type_path.path.segments.last()
-        .and_then(|segment| match &segment.arguments {
-            syn::PathArguments::AngleBracketed(args) => args.args.first(),
-            _ => None,
-        })
-        .and_then(|generic_arg| match generic_arg {
-            syn::GenericArgument::Type(ty) => Some(ty),
-            _ => None,
-        })
-}
-
-// Helper to extract key and value types from HashMap<K, V> or BTreeMap<K, V>
-fn get_map_key_value_types(type_path: &syn::TypePath) -> Option<(Option<&syn::Type>, Option<&syn::Type>)> {
-    type_path.path.segments.last()
-        .and_then(|segment| match &segment.arguments {
-            syn::PathArguments::AngleBracketed(args) if args.args.len() >= 2 => {
-                let key_type = match args.args.first() {
-                    Some(syn::GenericArgument::Type(ty)) => Some(ty),
-                    _ => None,
-                };
-                let value_type = match args.args.get(1) {
-                    Some(syn::GenericArgument::Type(ty)) => Some(ty),
-                    _ => None,
-                };
-                Some((key_type, value_type))
-            },
-            _ => None, // Not enough arguments or not angle bracketed
-        })
-}
-
-// Helper to get the base Python type name (e.g., "MyClass" from "Optional[MyClass]")
-fn get_base_python_type_name(rust_type: &syn::Type) -> String {
-    match rust_type {
-        syn::Type::Path(type_path) => {
-            if let Some(segment) = type_path.path.segments.last() {
-                let base_name = segment.ident.to_string();
-                // Handle Option<T>, Vec<T> etc. by recursing on the inner type if necessary
-                 match base_name.as_str() {
-                     "Option" | "Vec" => {
-                         if let Some(inner) = get_inner_type(type_path) {
-                             return get_base_python_type_name(inner); // Recursive call
-                         }
-                     },
-                     "HashMap" | "BTreeMap" => {
-                         // For maps, we typically care about the value type for fromDict
-                         if let Some((_, Some(value_type))) = get_map_key_value_types(type_path) {
-                             return get_base_python_type_name(value_type); // Recursive call on value type
-                         }
-                     },
-                     _ => {} // Fall through for other types
-                 }
-                 base_name // Return the base name if not Option/Vec/Map or inner type unknown
-            } else {
-                "Any".to_string() // Empty path segment
-            }
-        },
-        _ => "Any".to_string(), // Not a path type
-    }
-}
-
-// Helper to check if a Python type name is a primitive
-fn is_python_primitive(py_type_name: &str) -> bool {
-     matches!(py_type_name, "int" | "float" | "bool" | "str" | "Any" | "None") // Consider None primitive here
-}
-
 // Helper function to check if a type is a primitive type (Rust)
 fn is_primitive_type(type_name: &str) -> bool {
     matches!(type_name,
@@ -534,164 +467,10 @@ fn is_primitive_type(type_name: &str) -> bool {
         "bool" | "String" | "str" | "char")
 }
 
-// Helper to generate the Python *expression* for serializing a field's value
-fn generate_serialize_expr(inner_type: &syn::Type, value_var: &str) -> String {
-     match inner_type {
-        syn::Type::Path(type_path) => {
-            let last_segment = type_path.path.segments.last().unwrap(); // Assume valid path
-                         let type_name = last_segment.ident.to_string();
-
-                         match type_name.as_str() {
-                "Vec" => {
-                     // List serialization: serialize each item if possible
-                     format!(r#"[item._serialize() if hasattr(item, '_serialize') else item for item in {value}]"#,
-                         value = value_var)
-                },
-                "HashMap" | "BTreeMap" => {
-                    // Dict serialization: serialize values if possible
-                    format!(r#"{{k: v._serialize() if hasattr(v, '_serialize') else v for k, v in {value}.items()}}"#,
-                        value = value_var)
-                },
-                _ if is_primitive_type(&type_name) || type_name == "String" => {
-                    // Primitive types: assign directly
-                    value_var.to_string()
-                },
-                _ => {
-                    // Assumed custom struct/enum or external type
-                    format!(r#"(
-                        {value}.name if isinstance({value}, Enum) 
-                        else {value}._serialize() if hasattr({value}, '_serialize') 
-                        else {value}
-                    )"#,
-                    value = value_var)
-                }
-            }
-        },
-        _ => value_var.to_string(), // Fallback for non-path types
-    }
-}
-
-// Helper to generate Python serialization code for a single field
-fn generate_serialize_logic(field_name: &str, rust_type: &syn::Type) -> String {
-    let serialize_expr = match rust_type {
-        // Option<T> -> Check inner type T
-        syn::Type::Path(type_path) if type_path.path.segments.last().map_or(false, |seg| seg.ident == "Option") => {
-            if let Some(inner_type) = get_inner_type(type_path) {
-                generate_serialize_expr(inner_type, "value")
-            } else {
-                 "value".to_string()// Option<Any> or unknown
-            }
-        },
-        _ => generate_serialize_expr(rust_type, "value") // Non-option type
-    };
-
-    format!(r#"
-        key = "{key}" 
-        value = self.get(key)
-        if value is not None:
-            result[key] = {expr}"#, 
-        key = field_name, 
-        expr = serialize_expr)
-}
-
-// Helper to generate the Python *expression* for deserializing a value
-fn generate_deserialize_expr(inner_type: &syn::Type, value_var: &str) -> String {
-    match inner_type {
-        syn::Type::Path(type_path) => {
-            let py_type_name = get_base_python_type_name(inner_type); // Get potential class name like "MyStruct"
-
-            match type_path.path.segments.last().unwrap().ident.to_string().as_str() { // Match on outer type like "Vec"
-                "Vec" => {
-                    if let Some(item_type) = get_inner_type(type_path) { // Get type inside Vec<...>
-                        let item_py_class = get_base_python_type_name(item_type);
-                         if !is_python_primitive(&item_py_class) {
-                             // List of complex types
-                             format!(r#"[{cls}.fromDict(item) if isinstance(item, dict) else item for item in {value}]"#,
-                                 cls=item_py_class, value=value_var)
-                         } else {
-                             // List of primitive types
-                             value_var.to_string()
-                         }
-                    } else {
-                         // Vec<Any> or unknown
-                         value_var.to_string()
-                    }
-                },
-                "HashMap" | "BTreeMap" => {
-                    let (_key_type, value_type) = get_map_key_value_types(type_path).unwrap_or((None, None));
-                    if let Some(val_type) = value_type {
-                         let value_py_class = get_base_python_type_name(val_type);
-                         if !is_python_primitive(&value_py_class) {
-                             // Dictionary with complex values
-                            format!(r#"{{k: {cls}.fromDict(v) if isinstance(v, dict) else v for k, v in {value}.items()}}"#,
-                                cls=value_py_class, value=value_var)
-                         } else {
-                             // Dictionary with primitive values
-                             value_var.to_string()
-                         }
-                    } else {
-                        // HashMap<_, Any> or unknown
-                        value_var.to_string()
-                    }
-                },
-                _ if is_primitive_type(&py_type_name) || py_type_name == "String" => {
-                     value_var.to_string()
-                },
-                 _ => { // Assumed custom struct/enum
-                     format!(r#"(
-                        {cls}.fromDict({value}) if isinstance({value}, dict) 
-                        else {cls}[{value}] if isinstance({value}, str) and hasattr({cls}, '__members__') # Enum from name
-                        else {value} # Fallback
-                     )"#,
-                         cls=py_type_name, value=value_var)
-                 }
-            }
-        }
-         _ => value_var.to_string(), // Fallback for non-path types
-    }
-}
-
-// Helper to generate Python deserialization code for a single field
-fn generate_deserialize_logic(field_name: &str, rust_type: &syn::Type) -> String {
-    let base_logic = format!(r#"
-        key = "{key}" 
-        value = data.get(key)
-        if value is not None:"#, 
-        key = field_name
-    );
-
-    let assignment = match rust_type {
-         syn::Type::Path(type_path) if type_path.path.segments.last().map_or(false, |seg| seg.ident == "Option") => {
-             if let Some(inner_type) = get_inner_type(type_path) {
-                 let inner_expr = generate_deserialize_expr(inner_type, "value");
-                 format!(r#"            new_dict[key] = {expr}
-        else:
-            new_dict[key] = None"#, expr = inner_expr)
-             } else {
-                 // Option<Any>
-                 format!(r#"            new_dict[key] = value
-        else:
-            new_dict[key] = None"#)
-             }
-         }
-        _ => { // Not an Option
-             let expr = generate_deserialize_expr(rust_type, "value");
-             format!(r#"            new_dict[key] = {expr}"#, expr = expr)
-        }
-    };
-
-    format!("{}\n{}", base_logic, assignment)
-}
-
-// ====================================
-// End Helper functions
-// ====================================
-
 fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     let crate_rename: Path = parse_quote!(::ts_rs);
     let mut dependencies = Dependencies::new(crate_rename.clone());
 
-    // Imports needed for the generated Python code
     let mut imports = Vec::new();
     
     imports.push("from __future__ import annotations".to_string());
@@ -699,16 +478,15 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     imports.push("import json".to_string());
     imports.push("import inspect".to_string());  // Add inspect import
     imports.push("from enum import Enum, auto".to_string());
-    imports.push("from typing import Any, Optional, List, Dict, Union, TypedDict, TYPE_CHECKING".to_string());
+    imports.push("from typing import Any, Optional, List, Dict, Union, TYPE_CHECKING".to_string());
     imports.push("from dataclasses import *".to_string());
     imports.push("from uuid import UUID as Uuid".to_string());
     imports.push("".to_string());
 
     let mut field_annotations_vec = Vec::new();
-    let mut serialize_parts = Vec::new();
-    let mut from_dict_parts = Vec::new();
-    // let mut field_info = Vec::new(); // Removed as info is passed directly now
-
+    // We no longer need to track serialization and deserialization parts separately
+    // since we generate the code directly in the template
+    
     match &s.fields {
         syn::Fields::Named(fields) => {
             for f in &fields.named {
@@ -720,23 +498,17 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
 
                     let rust_type = f.ty.clone();
                     let py_type_str = get_py_type_for_rust_type(&rust_type).unwrap_or_else(|_| "Any".to_string());
-                    // field_info.push((field_name_str.clone(), rust_type.clone(), py_type_str.clone()));
 
                     field_annotations_vec.push(format!("    {}: {}", field_name_str, py_type_str));
                     dependencies.append_from(&rust_type);
-
-                    // --- _serialize logic ---
-                    let serialize_logic = generate_serialize_logic(&field_name_str, &rust_type);
-                    serialize_parts.push(serialize_logic);
-
-                    // --- fromDict logic ---
-                    let deserialize_logic = generate_deserialize_logic(&field_name_str, &rust_type);
-                    from_dict_parts.push(deserialize_logic);
+                    
+                    // We no longer collect serialization or deserialization snippets
+                    // for each field - that's handled directly in the template
                 }
             }
         },
         syn::Fields::Unnamed(_) => {
-             field_annotations_vec.push("    # TypedDict does not support unnamed fields directly".to_string());
+             field_annotations_vec.push("    # Dataclass does not support unnamed fields directly".to_string());
         },
         syn::Fields::Unit => {
              field_annotations_vec.push("    pass".to_string());
@@ -749,24 +521,9 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
         field_annotations_vec.join("\n")
     };
 
-    let serialize_impl = if serialize_parts.is_empty() {
-        "        return {}".to_string()
-    } else {
-        format!("        result = {{}}\n{}\n        return result", serialize_parts.join("")) // Join without extra newline
-    };
-
-    let from_dict_impl = if from_dict_parts.is_empty() {
-         // Use cls directly in cast, no TypeVar T needed
-         format!("        return cast({}, {{}}) # Return empty dict for unit structs", s.ident.to_string()) 
-    } else {
-        // Construct the final dict using cast for type safety
-        let construction = format!("        return cast({}, new_dict)", s.ident.to_string());
-        format!("        new_dict: Dict[str, Any] = {{}}\n{}\n\n{}", 
-            from_dict_parts.join(""), // Join without extra newline
-            construction)
-    };
-
-
+    // We're now generating the serialization and deserialization code directly in the template,
+    // so we don't need these variables anymore
+    
     let class_name = s.ident.to_string();
     let import_block = imports.join("\n");
 
@@ -774,37 +531,70 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     let py_class_code = format!(r#"
 {imports}
 
-class {class_name}(TypedDict):
+@dataclass
+class {class_name}:
 {field_annotations}
 
-    # Note: Methods below adapted for TypedDict behavior.
-
     def toJSON(self) -> str:
-        """Serialize this TypedDict to a JSON string."""
+        """Serialize this dataclass to a JSON string."""
         return json.dumps(self._serialize())
 
     def _serialize(self) -> dict:
-        """Convert this TypedDict to a serializable dictionary."""
-{serialize_impl}
+        """Convert this dataclass to a serializable dictionary."""
+        result = {{}}
+        for f in fields(self):
+            key = f.name
+            value = getattr(self, key)
+            if value is not None:
+                if hasattr(value, '_serialize'):
+                    result[key] = value._serialize()
+                elif isinstance(value, list):
+                    result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
+                elif isinstance(value, dict):
+                    result[key] = {{k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}}
+                else:
+                    result[key] = value
+        return result
 
     @classmethod
-    def fromJSON(cls, json_str: str) -> '{class_name}': # Use string forward reference
-        """Deserialize JSON string to a dictionary matching the TypedDict structure."""
+    def fromJSON(cls, json_str: str) -> '{class_name}':
+        """Deserialize JSON string to a new instance."""
         data = json.loads(json_str)
         return cls.fromDict(data)
 
     @classmethod
-    def fromDict(cls, data: dict) -> '{class_name}': # Use string forward reference
-        """Create an instance of this TypedDict from a dictionary.
+    def fromDict(cls, data: dict) -> '{class_name}':
+        """Create an instance from a dictionary.
            Recursively converts nested dictionaries if necessary.
         """
-{from_dict_impl}
+        if data is None:
+            return cls()
+            
+        kwargs = {{}}
+        for f in fields(cls):
+            key = f.name
+            value = data.get(key)
+            if value is not None:
+                # Handle complex types
+                if hasattr(f.type, 'fromDict') and isinstance(value, dict):
+                    kwargs[key] = f.type.fromDict(value)
+                elif isinstance(value, list) and hasattr(f.type, '__origin__') and f.type.__origin__ is list:
+                    # Handle lists - try to deserialize items if they seem to be complex objects
+                    element_type = getattr(f.type, '__args__', [Any])[0]
+                    if hasattr(element_type, 'fromDict'):
+                        kwargs[key] = [element_type.fromDict(item) if isinstance(item, dict) else item 
+                                      for item in value]
+                    else:
+                        kwargs[key] = value
+                else:
+                    # Use value directly
+                    kwargs[key] = value
+        
+        return cls(**kwargs)
 "#,
         imports = import_block,
         class_name = class_name,
-        field_annotations = field_annotations,
-        serialize_impl = serialize_impl,
-        from_dict_impl = from_dict_impl
+        field_annotations = field_annotations
     );
 
     // Dependencies are already added during field iteration
@@ -906,15 +696,14 @@ fn generate_dataclass_from_dict_body(fields: &syn::FieldsNamed) -> String {
             let field_name_str = field_name.to_string();
             if is_python_keyword(&field_name_str) || is_python_fragment(&field_name_str) { continue; }
 
-            let deserialize_expr = generate_deserialize_expr(&f.ty, "value");
+            // Simplified handling - we don't generate complex deserialize expressions anymore
             body.push_str(&format!(r#"
         key = "{key}" 
         value = data.get(key)
         if value is not None:
-            kwargs[key] = {expr}
+            kwargs[key] = value
         # else: field will be None or default if Optional/has default"#,
-                key = field_name_str,
-                expr = deserialize_expr
+                key = field_name_str
             ));
         }
     }
@@ -928,28 +717,27 @@ fn generate_dataclass_from_dict_body_unnamed(fields: &syn::FieldsUnnamed) -> Str
     // but could fall back to a list if that's how it's represented.
     let mut body = "        # Try extracting named fields first (field_0, field_1, ...)\n        kwargs = {}\n".to_string();
     let field_count = fields.unnamed.len();
-    for (i, f) in fields.unnamed.iter().enumerate() {
+    for (i, _) in fields.unnamed.iter().enumerate() {
         let field_name_str = format!("field_{}", i);
-        let deserialize_expr = generate_deserialize_expr(&f.ty, "value");
-         body.push_str(&format!(r#"
+        // Simplified handling - we don't generate complex deserialize expressions anymore
+        body.push_str(&format!(r#"
         key = "{key}" 
         value = data.get(key)
         if value is not None:
-            kwargs[key] = {expr}
-        # else: rely on dataclass defaults/errors"#,
-            key = field_name_str,
-            expr = deserialize_expr
+            kwargs[key] = value
+        # else: field will be None or default if Optional/has default"#,
+            key = field_name_str
         ));
     }
     body.push_str(&format!("\n        # Check if we got all fields, otherwise try list unpacking\n        if len(kwargs) == {}:\n            return cls(**kwargs)", field_count));
     // Fallback for list data (less common for fromDict)
     body.push_str(&format!(r#"
         elif isinstance(data, list) and len(data) == {field_count}: 
-            # TODO: Add recursive deserialization for list items if needed
-            return cls(*data) # Simple unpacking for now
+            # Simple unpacking for lists
+            return cls(*data)
         else:
             raise TypeError(f"Cannot create tuple variant {{cls.__name__}} from dict/list: {{data}}")"#,
-            field_count = field_count // Pass field_count as named argument
+            field_count = field_count
         ));
     body
 }
@@ -1113,8 +901,6 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                     result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
                 elif isinstance(value, dict):
                     result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}
-                elif isinstance(value, Enum):
-                    result[key] = value.name
                 else:
                     result[key] = value
         return result
@@ -1183,8 +969,6 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                     result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
                 elif isinstance(value, dict):
                     result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}
-                elif isinstance(value, Enum):
-                    result[key] = value.name
                 else:
                     result[key] = value
         return result
