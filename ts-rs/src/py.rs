@@ -351,6 +351,9 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
     if definition.contains("cast") { // Added cast check
         typing_imports.push("cast");
     }
+    if definition.contains("TypedDict") { // Added TypedDict check
+        typing_imports.push("TypedDict");
+    }
     
     // Combine all typing imports into one line
     if !typing_imports.is_empty() {
@@ -512,6 +515,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         buffer.push_str(&format!("from typing import {}\n", typing_imports.join(", ")));
     }
     buffer.push_str("from typing import TYPE_CHECKING\n"); // Always add TYPE_CHECKING
+    buffer.push_str("from typing import TypedDict\n");
     buffer.push_str("\n");
     
     // 3. Path handling logic (optional, could be removed if imports handle it)
@@ -541,7 +545,7 @@ fn export_to<T: Py + ?Sized + 'static, P: AsRef<Path>>(path: P) -> Result<(), Ex
         {
              // Basic check for malformed imports from Path objects
              if !import.contains("Path(") {
-                 custom_imports.push(format!("    {}", import));
+            custom_imports.push(format!("    {}", import));
              }
         }
     }

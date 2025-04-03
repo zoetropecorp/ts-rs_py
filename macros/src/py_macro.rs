@@ -692,17 +692,17 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     let mut dependencies = Dependencies::new(crate_rename.clone());
 
     // Imports needed for the generated Python code
-    let imports = vec![
-        "from __future__ import annotations".to_string(),
-        "".to_string(),
-        "import json".to_string(),
-        "from enum import Enum".to_string(),
-        "from typing import Any, Optional, List, Dict, TypedDict, cast".to_string(),
-        "from typing import TYPE_CHECKING".to_string(),
-        "from uuid import UUID as Uuid".to_string(),
-        "if TYPE_CHECKING:".to_string(),
-        "".to_string(),
-    ];
+    let mut imports = Vec::new();
+    
+    imports.push("from __future__ import annotations".to_string());
+    imports.push("".to_string());
+    imports.push("import json".to_string());
+    imports.push("import inspect".to_string());  // Add inspect import
+    imports.push("from enum import Enum, auto".to_string());
+    imports.push("from typing import Any, Optional, List, Dict, Union, TypedDict, TYPE_CHECKING".to_string());
+    imports.push("from dataclasses import *".to_string());
+    imports.push("from uuid import UUID as Uuid".to_string());
+    imports.push("".to_string());
 
     let mut field_annotations_vec = Vec::new();
     let mut serialize_parts = Vec::new();
@@ -898,35 +898,6 @@ fn generate_dataclass_to_json_method() -> String {
     "\n    def toJSON(self) -> str:\n        \"\"\"Serialize this dataclass instance to a JSON string.\"\"\"\n        return json.dumps(self._serialize())\n\n".to_string()
 }
 
-// Helper function to generate the _serialize method for dataclasses
-fn generate_dataclass_serialize_method() -> String {
-    // This serialize logic works for standard dataclasses
-    r#"
-    def _serialize(self) -> dict:
-        """Convert this dataclass instance to a serializable dictionary."""
-        result = {}
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if is_dataclass(value): # Use is_dataclass for nested dataclasses
-                result[f.name] = value._serialize()
-            elif isinstance(value, list):
-                result[f.name] = [item._serialize() if is_dataclass(item) else 
-                                  item.name if isinstance(item, Enum) else 
-                                  item for item in value]
-            elif isinstance(value, dict):
-                # Assuming dict values might be dataclasses or enums
-                result[f.name] = {k: v._serialize() if is_dataclass(v) else 
-                                   v.name if isinstance(v, Enum) else 
-                                   v for k, v in value.items()}
-            elif isinstance(value, Enum):
-                result[f.name] = value.name
-            elif value is not None:
-                 result[f.name] = value
-        return result
-
-    "#.to_string()
-}
-
 // Helper function to generate the body of the fromDict method for named field variants
 fn generate_dataclass_from_dict_body(fields: &syn::FieldsNamed) -> String {
     let mut body = "        kwargs = {}\n".to_string();
@@ -1066,6 +1037,7 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
     imports.push("from __future__ import annotations".to_string());
     imports.push("".to_string());
     imports.push("import json".to_string());
+    imports.push("import inspect".to_string());  // Add inspect import
     imports.push("from enum import Enum, auto".to_string());
     imports.push("from typing import Any, Optional, List, Dict, Union, TypedDict, TYPE_CHECKING".to_string());
     imports.push("from dataclasses import *".to_string());
@@ -1124,12 +1096,34 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 // Add toJSON method (uses _serialize helper)
                 dataclass_code.push_str(&generate_dataclass_to_json_method());
                 
-                // Add _serialize helper method
-                dataclass_code.push_str(&generate_dataclass_serialize_method());
+                // Add _serialize helper method - modified to include variant type
+                dataclass_code.push_str(r#"
+    def _serialize(self) -> dict:
+        """Convert this dataclass instance to a serializable dictionary with 'type' field."""
+        # Add the variant type based on the class name
+        variant_type = self.__class__.__name__.split('_', 1)[1] if '_' in self.__class__.__name__ else self.__class__.__name__
+        result = {"type": variant_type}
+        for f in fields(self):
+            key = f.name
+            value = getattr(self, key)
+            if value is not None:
+                if is_dataclass(value):
+                    result[key] = value._serialize()
+                elif isinstance(value, list):
+                    result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
+                elif isinstance(value, dict):
+                    result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}
+                elif isinstance(value, Enum):
+                    result[key] = value.name
+                else:
+                    result[key] = value
+        return result
+
+"#);
 
                 // Add fromJSON class method (Simplified signature)
                 dataclass_code.push_str(&format!(
-                    "@classmethod\n    def fromJSON(cls, json_str: str) -> '{}':\n        \"\"\"Deserialize JSON string to a new instance\"\"\"\n        data = json.loads(json_str)\n        return cls.fromDict(data)\n\n",
+                    "    @classmethod\n    def fromJSON(cls, json_str: str) -> '{}':\n        \"\"\"Deserialize JSON string to a new instance\"\"\"\n        data = json.loads(json_str)\n        return cls.fromDict(data)\n\n",
                     variant_class_name
                 ));
 
@@ -1172,8 +1166,30 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 // Add toJSON method (uses _serialize helper)
                 dataclass_code.push_str(&generate_dataclass_to_json_method());
                 
-                // Add _serialize helper method
-                dataclass_code.push_str(&generate_dataclass_serialize_method());
+                // Add _serialize helper method - modified to include variant type
+                dataclass_code.push_str(r#"
+    def _serialize(self) -> dict:
+        """Convert this dataclass instance to a serializable dictionary with 'type' field."""
+        # Add the variant type based on the class name
+        variant_type = self.__class__.__name__.split('_', 1)[1] if '_' in self.__class__.__name__ else self.__class__.__name__
+        result = {"type": variant_type}
+        for f in fields(self):
+            key = f.name
+            value = getattr(self, key)
+            if value is not None:
+                if is_dataclass(value):
+                    result[key] = value._serialize()
+                elif isinstance(value, list):
+                    result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
+                elif isinstance(value, dict):
+                    result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}
+                elif isinstance(value, Enum):
+                    result[key] = value.name
+                else:
+                    result[key] = value
+        return result
+
+"#);
 
                 // Add fromJSON class method (Simplified signature, using raw string)
                  dataclass_code.push_str(&format!(r#"
@@ -1208,14 +1224,16 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
         }
     }
     
+    // Don't need to modify the serialization logic in a replace operation anymore
+    // since we're implementing it directly above in the class definitions
+    
     // Generate the enum class
     if has_complex_variants {
-        // For complex enums, we'll use Union types to represent variants with fields
+        // For complex enums, we'll use a regular class with direct assignments instead of Enum
         let variants_decl = e.variants.iter()
             .filter(|v| {
                 // Filter out variants with invalid Python names
                 let variant_name = v.ident.to_string();
-                println!("variant_name: {}", variant_name);
                 !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name) && !variant_name.contains("TypedDict")
             })
             .map(|v| {
@@ -1223,114 +1241,93 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 
                 match &v.fields {
                     syn::Fields::Unit => {
-                        format!("    {} = auto()", variant_name)
+                        format!("    {} = \"{}\"  # Simple variant (string constant)", variant_name, variant_name)
                     },
                     syn::Fields::Named(_) | syn::Fields::Unnamed(_) => {
                         let variant_class_name = format!("{}_{}", enum_name, variant_name);
-                        format!("    {} = {}  # Complex variant with fields", variant_name, variant_class_name)
+                        format!("    {} = {}  # Complex variant (class reference)", variant_name, variant_class_name)
                     }
                 }
             }).collect::<Vec<_>>().join("\n");
         
-        generated_code.push_str(&format!("class {}(Enum):\n{}\n", enum_name, variants_decl));
+        // Create a regular class instead of an Enum
+        generated_code.push_str(&format!("class {}:\n    \"\"\"Namespace for {} variants. Access variant classes directly as attributes.\"\"\"\n{}\n", 
+            enum_name, enum_name, variants_decl));
         
-        // Add helper methods for complex enum
-        generated_code.push_str(&format!("\n    @classmethod\n    def create_{}(cls, variant_name: str, **kwargs):\n", 
-            variant_name_to_snake_case(&enum_name)
-        ));
-        generated_code.push_str("        \"\"\"Helper to create a variant instance with fields\"\"\"\n");
-        generated_code.push_str("        for variant in cls:\n");
-        generated_code.push_str("            if variant.name.lower() == variant_name.lower():\n");
-        
-        // Add code to create variant instances - with improved filtering
-        for variant in &e.variants {
-            // Only process valid variants (not Python keywords or code fragments)
-            let variant_name = variant.ident.to_string();
-            if is_python_keyword(&variant_name) || is_python_fragment(&variant_name) {
-                continue; // Skip invalid variant names
-            }
-            
-            if !matches!(variant.fields, syn::Fields::Unit) {
-                let variant_class_name = format!("{}_{}", enum_name, variant_name);
-                
-                generated_code.push_str(&format!(
-                    "                if variant == cls.{}:\n                    return {}(**kwargs)\n",
-                    variant_name, variant_class_name
-                ));
-            }
-        }
-        
-        generated_code.push_str("        raise ValueError(f\"Unknown variant {variant_name}\")\n");
-        
-        // Add toJSON method for complex enum
-        generated_code.push_str("\n    def toJSON(self) -> str:\n");
-        generated_code.push_str("        if isinstance(self.value, (int, str, bool, float)):\n");
-        generated_code.push_str("            return json.dumps({\"type\": self.name})\n");
-        generated_code.push_str("        if hasattr(self.value, 'toJSON') and callable(getattr(self.value, 'toJSON')):\n");
-        generated_code.push_str("            # For complex variants, we merge the variant type with the inner value\n");
-        generated_code.push_str("            inner_data = json.loads(self.value.toJSON())\n");
-        generated_code.push_str("            if isinstance(inner_data, dict):\n");
-        generated_code.push_str("                inner_data[\"type\"] = self.name\n");
-        generated_code.push_str("                return json.dumps(inner_data)\n");
-        generated_code.push_str("        return json.dumps({\"type\": self.name})\n");
-        
-        // Add fromJSON class method for complex enum deserialization
+        // Add fromJSON static method for deserialization
         generated_code.push_str("\n    @classmethod\n");
         generated_code.push_str("    def fromJSON(cls, json_str):\n");
-        generated_code.push_str("        \"\"\"Deserialize JSON string to an enum instance\"\"\"\n");
+        generated_code.push_str("        \"\"\"Deserialize JSON string to the appropriate variant type\"\"\"\n");
         generated_code.push_str("        data = json.loads(json_str)\n");
         generated_code.push_str("        if isinstance(data, str):\n");
-        generated_code.push_str("            # Simple enum with string value\n");
-        generated_code.push_str("            return cls[data]  # Get enum by name\n");
+        generated_code.push_str("            # Simple string variant\n");
+        generated_code.push_str("            if hasattr(cls, data):\n");
+        generated_code.push_str("                return getattr(cls, data)\n");
+        generated_code.push_str("            return data  # Unknown string variant\n");
         generated_code.push_str("        elif isinstance(data, dict):\n");
-        generated_code.push_str("            # Complex enum with fields\n");
+        generated_code.push_str("            # Complex variant with fields\n");
         generated_code.push_str("            if \"type\" in data:\n");
         generated_code.push_str("                variant_name = data[\"type\"]\n");
-        generated_code.push_str("                variant = cls[variant_name]  # Get enum variant by name\n");
-        generated_code.push_str("                \n");
-        generated_code.push_str("                # For complex variants with associated data\n");
-        generated_code.push_str("                if hasattr(variant.value, 'fromDict') and callable(getattr(variant.value, 'fromDict')):\n");
-        generated_code.push_str("                    # Create data object from the dictionary (excluding the type field)\n");
-        generated_code.push_str("                    variant_data = {k: v for k, v in data.items() if k != \"type\"}\n");
-        generated_code.push_str("                    return variant.value.__class__.fromDict(variant_data)\n");
-        generated_code.push_str("                \n");
-        generated_code.push_str("                return variant\n");
-        generated_code.push_str("        # Default fallback - return first variant\n");
-        generated_code.push_str("        return next(iter(cls))\n");
+        generated_code.push_str("                if hasattr(cls, variant_name):\n");
+        generated_code.push_str("                    variant_class = getattr(cls, variant_name)\n");
+        generated_code.push_str("                    # Check if it's a class with fromDict method\n");
+        generated_code.push_str("                    if inspect.isclass(variant_class) and hasattr(variant_class, 'fromDict'):\n");
+        generated_code.push_str("                        # Strip the type field before passing to fromDict\n");
+        generated_code.push_str("                        variant_data = {k: v for k, v in data.items() if k != \"type\"}\n");
+        generated_code.push_str("                        return variant_class.fromDict(variant_data)\n");
+        generated_code.push_str("                    return variant_class  # Return the string constant\n");
+        generated_code.push_str("        # Default fallback - return None for unknown type\n");
+        generated_code.push_str("        return None\n");
+        
+        // Add helper factory method (renamed from create_*)
+        generated_code.push_str("\n    @classmethod\n    def create(cls, variant_name: str, **kwargs):\n");
+        generated_code.push_str("        \"\"\"Factory method to create a variant instance with fields\"\"\"\n");
+        generated_code.push_str("        if hasattr(cls, variant_name):\n");
+        generated_code.push_str("            variant_class = getattr(cls, variant_name)\n");
+        generated_code.push_str("            if inspect.isclass(variant_class):  # Only call complex variants (classes)\n");
+        generated_code.push_str("                return variant_class(**kwargs)\n");
+        generated_code.push_str("            return variant_class  # Return the string constant\n");
+        generated_code.push_str("        raise ValueError(f\"Unknown variant {variant_name}\")\n");
         
     } else {
-        // Simple enum with just unit variants - improve filtering here
-        let variants_code = e.variants.iter().enumerate()
-            .filter(|(_, v)| {
+        // Simple enum with just unit variants - use string constants in a namespace
+        let variants_code = e.variants.iter()
+            .filter(|v| {
                 let variant_name = v.ident.to_string();
                 // Make sure the variant name is a valid Python identifier
                 !is_python_keyword(&variant_name) && !is_python_fragment(&variant_name) && !variant_name.contains("TypedDict")
             })
-            .map(|(i, v)| {
-                format!("    {} = {}", v.ident, i + 1)
+            .map(|v| {
+                format!("    {} = \"{}\"", v.ident, v.ident)
             }).collect::<Vec<_>>().join("\n");
         
-        generated_code.push_str(&format!("class {}(Enum):\n{}\n", enum_name, variants_code));
+        generated_code.push_str(&format!("class {}:\n    \"\"\"Namespace for {} variants (simple string constants)\"\"\"\n{}\n", 
+            enum_name, enum_name, variants_code));
         
-        // Add toJSON method for simple enum
-        generated_code.push_str("\n    def toJSON(self) -> str:\n");
-        generated_code.push_str("        return json.dumps(self.name)\n");
-        
-        // Add fromJSON method for simple enum
+        // Add fromJSON method for simple namespace
         generated_code.push_str("\n    @classmethod\n");
         generated_code.push_str("    def fromJSON(cls, json_str):\n");
-        generated_code.push_str("        \"\"\"Deserialize JSON string to an enum instance\"\"\"\n");
+        generated_code.push_str("        \"\"\"Deserialize JSON string to a variant constant\"\"\"\n");
         generated_code.push_str("        data = json.loads(json_str)\n");
         generated_code.push_str("        if isinstance(data, str):\n");
-        generated_code.push_str("            return cls[data]  # Get enum by name\n");
-        generated_code.push_str("        elif isinstance(data, int):\n");
-        generated_code.push_str("            # Get enum by value if it's an integer\n");
-        generated_code.push_str("            for enum_item in cls:\n");
-        generated_code.push_str("                if enum_item.value == data:\n");
-        generated_code.push_str("                    return enum_item\n");
-        generated_code.push_str("        # Default fallback - return first variant\n");
-        generated_code.push_str("        return next(iter(cls))\n");
+        generated_code.push_str("            # Return the string constant if it exists\n");
+        generated_code.push_str("            if hasattr(cls, data):\n");
+        generated_code.push_str("                return getattr(cls, data)\n");
+        generated_code.push_str("            return data  # Unknown string value\n");
+        generated_code.push_str("        elif isinstance(data, dict) and \"type\" in data:\n");
+        generated_code.push_str("            variant_name = data[\"type\"]\n");
+        generated_code.push_str("            if hasattr(cls, variant_name):\n");
+        generated_code.push_str("                return getattr(cls, variant_name)\n");
+        generated_code.push_str("        # Default fallback - return None for unknown type\n");
+        generated_code.push_str("        return None\n");
     }
+    
+    // Also modify the dataclass serialization logic to include the variant type
+    // Find and replace in the _serialize methods
+    generated_code = generated_code.replace(
+        "    def _serialize(self) -> dict:",
+        "    def _serialize(self) -> dict:\n        \"\"\"Convert this dataclass instance to a serializable dictionary with 'type' field.\"\"\"\n        # Add the variant type based on the class name\n        variant_type = self.__class__.__name__.split('_', 1)[1] if '_' in self.__class__.__name__ else self.__class__.__name__\n        result = {\"type\": variant_type}"
+    );
     
     let py_name_owned = enum_name.clone();
     let inline_name = quote!(#py_name_owned.to_owned());
@@ -1349,19 +1346,6 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
         export: false,
         export_to: None,
     })
-}
-
-fn variant_name_to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    
-    for (i, c) in name.char_indices() {
-        if i > 0 && c.is_uppercase() {
-            result.push('_');
-        }
-        result.push(c.to_lowercase().next().unwrap());
-    }
-    
-    result
 }
 
 // Helper function to detect Python code fragments
