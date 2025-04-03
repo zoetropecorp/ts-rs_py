@@ -546,12 +546,23 @@ class {class_name}:
             key = f.name
             value = getattr(self, key)
             if value is not None:
-                if hasattr(value, '_serialize'):
+                if isinstance(value, Uuid):
+                    # Special handling for UUIDs - convert to string
+                    result[key] = str(value)
+                elif hasattr(value, '_serialize'):
                     result[key] = value._serialize()
                 elif isinstance(value, list):
-                    result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
+                    result[key] = [
+                        str(item) if isinstance(item, Uuid) else
+                        item._serialize() if hasattr(item, '_serialize') else 
+                        item for item in value
+                    ]
                 elif isinstance(value, dict):
-                    result[key] = {{k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}}
+                    result[key] = {{
+                        k: str(v) if isinstance(v, Uuid) else
+                        v._serialize() if hasattr(v, '_serialize') else 
+                        v for k, v in value.items()
+                    }}
                 else:
                     result[key] = value
         return result
@@ -895,12 +906,23 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
             key = f.name
             value = getattr(self, key)
             if value is not None:
-                if is_dataclass(value):
+                if isinstance(value, Uuid):
+                    # Special handling for UUIDs - convert to string
+                    result[key] = str(value)
+                elif hasattr(value, '_serialize'):
                     result[key] = value._serialize()
                 elif isinstance(value, list):
-                    result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
+                    result[key] = [
+                        str(item) if isinstance(item, Uuid) else
+                        item._serialize() if hasattr(item, '_serialize') else 
+                        item for item in value
+                    ]
                 elif isinstance(value, dict):
-                    result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}
+                    result[key] = {
+                        k: str(v) if isinstance(v, Uuid) else
+                        v._serialize() if hasattr(v, '_serialize') else 
+                        v for k, v in value.items()
+                    }
                 else:
                     result[key] = value
         return result
@@ -963,12 +985,23 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
             key = f.name
             value = getattr(self, key)
             if value is not None:
-                if is_dataclass(value):
+                if isinstance(value, Uuid):
+                    # Special handling for UUIDs - convert to string
+                    result[key] = str(value)
+                elif hasattr(value, '_serialize'):
                     result[key] = value._serialize()
                 elif isinstance(value, list):
-                    result[key] = [item._serialize() if hasattr(item, '_serialize') else item for item in value]
+                    result[key] = [
+                        str(item) if isinstance(item, Uuid) else
+                        item._serialize() if hasattr(item, '_serialize') else 
+                        item for item in value
+                    ]
                 elif isinstance(value, dict):
-                    result[key] = {k: v._serialize() if hasattr(v, '_serialize') else v for k, v in value.items()}
+                    result[key] = {
+                        k: str(v) if isinstance(v, Uuid) else
+                        v._serialize() if hasattr(v, '_serialize') else 
+                        v for k, v in value.items()
+                    }
                 else:
                     result[key] = value
         return result
