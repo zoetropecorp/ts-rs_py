@@ -8,6 +8,13 @@ use syn::{
 };
 
 use crate::{deps::Dependencies, utils::format_generics};
+use heck::ToUpperCamelCase;
+use heck::ToLowerCamelCase;
+use heck::ToSnakeCase;
+use heck::ToShoutySnakeCase;
+use heck::ToKebabCase;
+use heck::ToShoutyKebabCase;
+use heck::ToTitleCase;
 
 struct DerivedPy {
     crate_rename: Path,
@@ -470,7 +477,7 @@ fn is_primitive_type(type_name: &str) -> bool {
 fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
     let crate_rename: Path = parse_quote!(::ts_rs);
     let mut dependencies = Dependencies::new(crate_rename.clone());
-
+    
     let mut imports = Vec::new();
     
     imports.push("from __future__ import annotations".to_string());
@@ -491,8 +498,8 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
         syn::Fields::Named(fields) => {
             for f in &fields.named {
                 if let Some(field_name) = f.ident.as_ref() {
-                    let field_name_str = field_name.to_string();
-                    if is_python_keyword(&field_name_str) || is_python_fragment(&field_name_str) {
+                let field_name_str = field_name.to_string();
+                if is_python_keyword(&field_name_str) || is_python_fragment(&field_name_str) {
                         continue;
                     }
 
@@ -523,7 +530,7 @@ fn py_struct_def(s: &syn::ItemStruct) -> Result<DerivedPy> {
 
     // We're now generating the serialization and deserialization code directly in the template,
     // so we don't need these variables anymore
-    
+
     let class_name = s.ident.to_string();
     let import_block = imports.join("\n");
 
@@ -550,21 +557,21 @@ class {class_name}:
                     # Special handling for UUIDs - convert to string
                     result[key] = str(value)
                 elif hasattr(value, '_serialize'):
-                    result[key] = value._serialize()
-                elif isinstance(value, list):
+                result[key] = value._serialize()
+            elif isinstance(value, list):
                     result[key] = [
                         str(item) if isinstance(item, Uuid) else
                         item._serialize() if hasattr(item, '_serialize') else 
                         item for item in value
                     ]
-                elif isinstance(value, dict):
+            elif isinstance(value, dict):
                     result[key] = {{
                         k: str(v) if isinstance(v, Uuid) else
                         v._serialize() if hasattr(v, '_serialize') else 
                         v for k, v in value.items()
                     }}
-                else:
-                    result[key] = value
+            else:
+                result[key] = value
         return result
 
     @classmethod
@@ -584,22 +591,41 @@ class {class_name}:
         kwargs = {{}}
         for f in fields(cls):
             key = f.name
-            value = data.get(key)
-            if value is not None:
-                # Handle complex types
-                if hasattr(f.type, 'fromDict') and isinstance(value, dict):
-                    kwargs[key] = f.type.fromDict(value)
-                elif isinstance(value, list) and hasattr(f.type, '__origin__') and f.type.__origin__ is list:
-                    # Handle lists - try to deserialize items if they seem to be complex objects
-                    element_type = getattr(f.type, '__args__', [Any])[0]
-                    if hasattr(element_type, 'fromDict'):
-                        kwargs[key] = [element_type.fromDict(item) if isinstance(item, dict) else item 
-                                      for item in value]
+            # Check if key exists in the data dict
+            if key in data:
+                value = data.get(key)
+                # Even if value is None, we need to include it in kwargs
+                # for required parameters that accept None
+                if value is not None:
+                    # Handle UUID fields
+                    if f.type == Uuid and isinstance(value, str):
+                        kwargs[key] = Uuid(value)
+                    # Handle complex types
+                    elif hasattr(f.type, 'fromDict') and isinstance(value, dict):
+                        kwargs[key] = f.type.fromDict(value)
+                    elif isinstance(value, list) and hasattr(f.type, '__origin__') and f.type.__origin__ is list:
+                        # Handle lists
+                        element_type = getattr(f.type, '__args__', [Any])[0]
+                        if element_type == Uuid:
+                            # List of UUIDs
+                            kwargs[key] = [Uuid(item) if isinstance(item, str) else item for item in value]
+                        elif inspect.isclass(element_type) and hasattr(element_type, 'fromJSON'):
+                            # List of Enum Namespace types - use static fromJSON
+                            kwargs[key] = [element_type.fromJSON(json.dumps(item)) if isinstance(item, dict) else item 
+                                          for item in value]
+                        elif inspect.isclass(element_type) and hasattr(element_type, 'fromDict'):
+                             # List of regular Dataclasses - use fromDict
+                            kwargs[key] = [element_type.fromDict(item) if isinstance(item, dict) else item 
+                                          for item in value]
+                        else:
+                            # List of primitives or unknown
+                            kwargs[key] = value
                     else:
+                        # Use value directly (primitives, etc.)
                         kwargs[key] = value
                 else:
-                    # Use value directly
-                    kwargs[key] = value
+                    # Add null/None value to kwargs
+                    kwargs[key] = None
         
         return cls(**kwargs)
 "#,
@@ -694,72 +720,92 @@ fn get_py_type_for_rust_type(ty: &syn::Type) -> Result<String> {
 // Helper functions specifically for py_enum_def
 // =============================================
 
+// Helper function to apply rename_all rule
+fn apply_rename_rule(name: &str, rule: RenameRule) -> String {
+    match rule {
+        RenameRule::PascalCase => name.to_upper_camel_case(),
+        RenameRule::LowerCase => name.to_lowercase(),
+        RenameRule::UpperCase => name.to_uppercase(),
+        RenameRule::CamelCase => name.to_lower_camel_case(),
+        RenameRule::SnakeCase => name.to_snake_case(),
+        RenameRule::ScreamingSnakeCase => name.to_shouty_snake_case(),
+        RenameRule::KebabCase => name.to_kebab_case(),
+        RenameRule::ScreamingKebabCase => name.to_shouty_kebab_case(),
+        RenameRule::TitleCase => name.to_title_case(),
+        RenameRule::None => name.to_string(), // No change
+    }
+}
+
 // Helper function to generate the toJSON method for dataclasses
 fn generate_dataclass_to_json_method() -> String {
     "\n    def toJSON(self) -> str:\n        \"\"\"Serialize this dataclass instance to a JSON string.\"\"\"\n        return json.dumps(self._serialize())\n\n".to_string()
-}
-
-// Helper function to generate the body of the fromDict method for named field variants
-fn generate_dataclass_from_dict_body(fields: &syn::FieldsNamed) -> String {
-    let mut body = "        kwargs = {}\n".to_string();
-    for f in &fields.named {
-        if let Some(field_name) = f.ident.as_ref() {
-            let field_name_str = field_name.to_string();
-            if is_python_keyword(&field_name_str) || is_python_fragment(&field_name_str) { continue; }
-
-            // Simplified handling - we don't generate complex deserialize expressions anymore
-            body.push_str(&format!(r#"
-        key = "{key}" 
-        value = data.get(key)
-        if value is not None:
-            kwargs[key] = value
-        # else: field will be None or default if Optional/has default"#,
-                key = field_name_str
-            ));
-        }
-    }
-    body.push_str("\n        return cls(**kwargs)");
-    body
-}
-
-// Helper function to generate the body of the fromDict method for unnamed (tuple) field variants
-fn generate_dataclass_from_dict_body_unnamed(fields: &syn::FieldsUnnamed) -> String {
-    // For tuple variants, fromDict primarily expects the fields to be named field_0, field_1, ... in the dict
-    // but could fall back to a list if that's how it's represented.
-    let mut body = "        # Try extracting named fields first (field_0, field_1, ...)\n        kwargs = {}\n".to_string();
-    let field_count = fields.unnamed.len();
-    for (i, _) in fields.unnamed.iter().enumerate() {
-        let field_name_str = format!("field_{}", i);
-        // Simplified handling - we don't generate complex deserialize expressions anymore
-        body.push_str(&format!(r#"
-        key = "{key}" 
-        value = data.get(key)
-        if value is not None:
-            kwargs[key] = value
-        # else: field will be None or default if Optional/has default"#,
-            key = field_name_str
-        ));
-    }
-    body.push_str(&format!("\n        # Check if we got all fields, otherwise try list unpacking\n        if len(kwargs) == {}:\n            return cls(**kwargs)", field_count));
-    // Fallback for list data (less common for fromDict)
-    body.push_str(&format!(r#"
-        elif isinstance(data, list) and len(data) == {field_count}: 
-            # Simple unpacking for lists
-            return cls(*data)
-        else:
-            raise TypeError(f"Cannot create tuple variant {{cls.__name__}} from dict/list: {{data}}")"#,
-            field_count = field_count
-        ));
-    body
 }
 
 // =============================================
 // End Enum helper functions
 // =============================================
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenameRule {
+    PascalCase,
+    LowerCase,
+    UpperCase,
+    CamelCase,
+    SnakeCase,
+    ScreamingSnakeCase,
+    KebabCase,
+    ScreamingKebabCase,
+    TitleCase,
+    None,
+}
+
 fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
     let crate_rename: Path = parse_quote!(::ts_rs);
     let mut dependencies = Dependencies::new(crate_rename.clone());
+    
+    let mut serde_tag = "type".to_string();
+    let mut rename_all_rule = RenameRule::None;
+
+    // Parse serde attributes
+    for attr in &e.attrs {
+        if attr.path().is_ident("serde") {
+            if let Ok(list) = attr.meta.require_list() {
+                list.parse_args_with(|input: syn::parse::ParseStream| {
+                    while !input.is_empty() {
+                        let lookahead = input.lookahead1();
+                        if lookahead.peek(syn::Ident) {
+                            let ident: syn::Ident = input.parse()?;
+                            if ident == "tag" {
+                                let _eq: syn::Token![=] = input.parse()?;
+                                let tag_value: syn::LitStr = input.parse()?;
+                                serde_tag = tag_value.value();
+                            } else if ident == "rename_all" {
+                                let _eq: syn::Token![=] = input.parse()?;
+                                let rule_str: syn::LitStr = input.parse()?;
+                                rename_all_rule = match rule_str.value().as_str() {
+                                    "PascalCase" => RenameRule::PascalCase,
+                                    "lowercase" => RenameRule::LowerCase,
+                                    "UPPERCASE" => RenameRule::UpperCase,
+                                    "camelCase" => RenameRule::CamelCase,
+                                    "snake_case" => RenameRule::SnakeCase,
+                                    "SCREAMING_SNAKE_CASE" => RenameRule::ScreamingSnakeCase,
+                                    "kebab-case" => RenameRule::KebabCase,
+                                    "SCREAMING-KEBAB-CASE" => RenameRule::ScreamingKebabCase,
+                                    "title_case" => RenameRule::TitleCase,
+                                    _ => RenameRule::None, // Default or unknown
+                                };
+                            }
+                        }
+                        // Consume comma if present
+                        if input.peek(syn::Token![,]) {
+                            let _comma: syn::Token![,] = input.parse()?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
     
     // Loop through variants to collect dependencies from fields
     for v in &e.variants {
@@ -896,12 +942,12 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 dataclass_code.push_str(&generate_dataclass_to_json_method());
                 
                 // Add _serialize helper method - modified to include variant type
-                dataclass_code.push_str(r#"
+                dataclass_code.push_str(&format!(r#"
     def _serialize(self) -> dict:
-        """Convert this dataclass instance to a serializable dictionary with 'type' field."""
+        """Convert this dataclass instance to a serializable dictionary with '{}' field."""
         # Add the variant type based on the class name
         variant_type = self.__class__.__name__.split('_', 1)[1] if '_' in self.__class__.__name__ else self.__class__.__name__
-        result = {"type": variant_type}
+        result = {{"\"{}\"": "{}"}} # Use the specified tag and apply rename rule
         for f in fields(self):
             key = f.name
             value = getattr(self, key)
@@ -918,30 +964,43 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                         item for item in value
                     ]
                 elif isinstance(value, dict):
-                    result[key] = {
+                    result[key] = {{ # Escape braces for dict literal
                         k: str(v) if isinstance(v, Uuid) else
                         v._serialize() if hasattr(v, '_serialize') else 
                         v for k, v in value.items()
-                    }
+                    }}
                 else:
                     result[key] = value
         return result
+"#, 
+                    serde_tag, // Add serde_tag to format args
+                    serde_tag, 
+                    apply_rename_rule(&variant_name, rename_all_rule)
+                ));
 
-"#);
-
-                // Add fromJSON class method (Simplified signature)
+                // Add fromJSON class method 
                 dataclass_code.push_str(&format!(
-                    "    @classmethod\n    def fromJSON(cls, json_str: str) -> '{}':\n        \"\"\"Deserialize JSON string to a new instance\"\"\"\n        data = json.loads(json_str)\n        return cls.fromDict(data)\n\n",
+                    "    @classmethod\n    def fromJSON(cls, json_str: str) -> '{}':\n        \"\"\"Deserialize JSON string to a new instance\"\"\"\n        data = json.loads(json_str)\n        # Expects a list for tuple variants in JSON\n        if isinstance(data, list):\n             return cls(*data) # Unpack list directly\n        elif isinstance(data, dict): # Allow dict for named tuple fields if needed\n              return cls.fromDict(data)\n        else:\n              raise TypeError(f\"Expected list or dict for tuple variant, got {{{{type(data).__name__}}}}\")\n\n",
                     variant_class_name
                 ));
 
-                // Add fromDict class method (Simplified signature)
-                let from_dict_body = generate_dataclass_from_dict_body(fields);
+                // Add fromDict class method with proper UUID handling
                 dataclass_code.push_str(&format!(
-                    "    @classmethod\n    def fromDict(cls, data: dict) -> '{}':\n        \"\"\"Create an instance from a dictionary, handling nested types\"\"\"\n{}
-",
-                    variant_class_name,
-                    from_dict_body
+                    "    @classmethod\n    def fromDict(cls, data: dict) -> '{}':\n        \"\"\"Create an instance from a dictionary, handling nested types\"\"\"\n        kwargs = {{}}\n        for f in fields(cls):\n            key = f.name\n            # Check if key exists in the data dict\n            if key in data:\n                value = data.get(key)\n                # Even if value is None, we need to include it in kwargs\n                # for required parameters that accept None\n                if value is not None:\n                    # Handle UUID fields\n                    if f.type == Uuid and isinstance(value, str):\n                        kwargs[key] = Uuid(value)\n                    # Handle complex types\n                    elif hasattr(f.type, 'fromDict') and isinstance(value, dict):\n                        kwargs[key] = f.type.fromDict(value)\n                    elif isinstance(value, list) and hasattr(f.type, '__origin__') and f.type.__origin__ is list:\n                        # Handle lists\n                        element_type = getattr(f.type, '__args__', [Any])[0]\n                        if element_type == Uuid:\n                            # List of UUIDs\n                            kwargs[key] = [Uuid(item) if isinstance(item, str) else item for item in value]\n                        elif inspect.isclass(element_type) and hasattr(element_type, 'fromJSON'):
+                            # List of Enum Namespace types - use static fromJSON
+                            kwargs[key] = [element_type.fromJSON(json.dumps(item)) if isinstance(item, dict) else item 
+                                          for item in value]
+                        elif inspect.isclass(element_type) and hasattr(element_type, 'fromDict'):
+                             # List of regular Dataclasses - use fromDict
+                            kwargs[key] = [element_type.fromDict(item) if isinstance(item, dict) else item 
+                                          for item in value]
+                        else:
+                            # List of primitives or unknown
+                            kwargs[key] = value
+                    else:\n                        # Use value directly (primitives, etc.)
+                        kwargs[key] = value
+                else:\n                    # Add null/None value to kwargs\n                    kwargs[key] = None\n        \n        return cls(**kwargs)\n",
+                    variant_class_name
                 ));
                 
                 generated_code.push_str(&dataclass_code);
@@ -975,12 +1034,12 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                 dataclass_code.push_str(&generate_dataclass_to_json_method());
                 
                 // Add _serialize helper method - modified to include variant type
-                dataclass_code.push_str(r#"
+                dataclass_code.push_str(&format!(r#"
     def _serialize(self) -> dict:
-        """Convert this dataclass instance to a serializable dictionary with 'type' field."""
+        """Convert this dataclass instance to a serializable dictionary with '{}' field."""
         # Add the variant type based on the class name
         variant_type = self.__class__.__name__.split('_', 1)[1] if '_' in self.__class__.__name__ else self.__class__.__name__
-        result = {"type": variant_type}
+        result = {{"\"{}\"": "{}"}} # Use the specified tag and apply rename rule
         for f in fields(self):
             key = f.name
             value = getattr(self, key)
@@ -997,42 +1056,43 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
                         item for item in value
                     ]
                 elif isinstance(value, dict):
-                    result[key] = {
+                    result[key] = {{ # Escape braces for dict literal
                         k: str(v) if isinstance(v, Uuid) else
                         v._serialize() if hasattr(v, '_serialize') else 
                         v for k, v in value.items()
-                    }
+                    }}
                 else:
                     result[key] = value
         return result
-
-"#);
-
-                // Add fromJSON class method (Simplified signature, using raw string)
-                 dataclass_code.push_str(&format!(r#"
-    @classmethod
-    def fromJSON(cls, json_str: str) -> '{variant_class_name}':
-        """Deserialize JSON string to a new instance"""
-        data = json.loads(json_str)
-        # Expects a list for tuple variants in JSON
-        if isinstance(data, list):
-             return cls(*data) # Unpack list directly
-        elif isinstance(data, dict): # Allow dict for named tuple fields if needed
-              return cls.fromDict(data)
-        else:
-              raise TypeError(f"Expected list or dict for tuple variant, got {{type(data).__name__}}")
-
-"#, // Use double braces {{}} for Python f-string within raw string
-                    variant_class_name = variant_class_name
+"#, 
+                    serde_tag, // Add serde_tag to format args
+                    serde_tag, 
+                    apply_rename_rule(&variant_name, rename_all_rule)
                 ));
-                
-                // Add fromDict class method (Simplified signature)
-                let from_dict_body = generate_dataclass_from_dict_body_unnamed(fields);
-                dataclass_code.push_str(&format!( // This format! already uses r#"..."# 
-                    "    @classmethod\n    def fromDict(cls, data: dict) -> '{}':\n        \"\"\"Create an instance from a dictionary, handling named fields or list fallback\"\"\"\n{}
-",
-                    variant_class_name,
-                    from_dict_body
+
+                // Add fromJSON class method 
+                dataclass_code.push_str(&format!(
+                    "    @classmethod\n    def fromJSON(cls, json_str: str) -> '{}':\n        \"\"\"Deserialize JSON string to a new instance\"\"\"\n        data = json.loads(json_str)\n        # Expects a list for tuple variants in JSON\n        if isinstance(data, list):\n             return cls(*data) # Unpack list directly\n        elif isinstance(data, dict): # Allow dict for named tuple fields if needed\n              return cls.fromDict(data)\n        else:\n              raise TypeError(f\"Expected list or dict for tuple variant, got {{{{type(data).__name__}}}}\")\n\n",
+                    variant_class_name
+                ));
+
+                // Add fromDict class method with proper UUID handling
+                dataclass_code.push_str(&format!(
+                    "    @classmethod\n    def fromDict(cls, data: dict) -> '{}':\n        \"\"\"Create an instance from a dictionary, handling nested types\"\"\"\n        kwargs = {{}}\n        for f in fields(cls):\n            key = f.name\n            # Check if key exists in the data dict\n            if key in data:\n                value = data.get(key)\n                # Even if value is None, we need to include it in kwargs\n                # for required parameters that accept None\n                if value is not None:\n                    # Handle UUID fields\n                    if f.type == Uuid and isinstance(value, str):\n                        kwargs[key] = Uuid(value)\n                    # Handle complex types\n                    elif hasattr(f.type, 'fromDict') and isinstance(value, dict):\n                        kwargs[key] = f.type.fromDict(value)\n                    elif isinstance(value, list) and hasattr(f.type, '__origin__') and f.type.__origin__ is list:\n                        # Handle lists\n                        element_type = getattr(f.type, '__args__', [Any])[0]\n                        if element_type == Uuid:\n                            # List of UUIDs\n                            kwargs[key] = [Uuid(item) if isinstance(item, str) else item for item in value]\n                        elif inspect.isclass(element_type) and hasattr(element_type, 'fromJSON'):
+                            # List of Enum Namespace types - use static fromJSON
+                            kwargs[key] = [element_type.fromJSON(json.dumps(item)) if isinstance(item, dict) else item 
+                                          for item in value]
+                        elif inspect.isclass(element_type) and hasattr(element_type, 'fromDict'):
+                             # List of regular Dataclasses - use fromDict
+                            kwargs[key] = [element_type.fromDict(item) if isinstance(item, dict) else item 
+                                          for item in value]
+                        else:
+                            # List of primitives or unknown
+                            kwargs[key] = value
+                    else:\n                        # Use value directly (primitives, etc.)
+                        kwargs[key] = value
+                else:\n                    # Add null/None value to kwargs\n                    kwargs[key] = None\n        \n        return cls(**kwargs)\n",
+                    variant_class_name
                 ));
                 
                 generated_code.push_str(&dataclass_code);
@@ -1072,35 +1132,56 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
             enum_name, enum_name, variants_decl));
         
         // Add fromJSON static method for deserialization
-        generated_code.push_str("\n    @classmethod\n");
-        generated_code.push_str("    def fromJSON(cls, json_str):\n");
-        generated_code.push_str("        \"\"\"Deserialize JSON string to the appropriate variant type\"\"\"\n");
+        generated_code.push_str("\n    @staticmethod\n");
+        generated_code.push_str("    def fromJSON(json_str):\n");
+        generated_code.push_str(&format!("        \"\"\"Deserialize JSON string using the '{}' tag to determine variant type\"\"\"\n", serde_tag));
         generated_code.push_str("        data = json.loads(json_str)\n");
         generated_code.push_str("        if isinstance(data, str):\n");
-        generated_code.push_str("            # Simple string variant\n");
-        generated_code.push_str("            if hasattr(cls, data):\n");
-        generated_code.push_str("                return getattr(cls, data)\n");
+        generated_code.push_str("            # Simple string variant - compare against original and renamed names\n");
+        // Generate checks for both original and renamed simple variants
+        for v in e.variants.iter().filter(|v| matches!(v.fields, syn::Fields::Unit)) {
+            let original_name = v.ident.to_string();
+            let renamed = apply_rename_rule(&original_name, rename_all_rule);
+            if original_name == renamed {
+                 generated_code.push_str(&format!("            if data == \"{}\":\n                return getattr({}, data)\n", 
+                    original_name, enum_name));
+            } else {
+                 generated_code.push_str(&format!("            if data == \"{}\" or data == \"{}\":\n                return getattr({}, \"{}\")\n", 
+                    original_name, renamed, enum_name, original_name));
+            }
+        }
         generated_code.push_str("            return data  # Unknown string variant\n");
         generated_code.push_str("        elif isinstance(data, dict):\n");
         generated_code.push_str("            # Complex variant with fields\n");
-        generated_code.push_str("            if \"type\" in data:\n");
-        generated_code.push_str("                variant_name = data[\"type\"]\n");
-        generated_code.push_str("                if hasattr(cls, variant_name):\n");
-        generated_code.push_str("                    variant_class = getattr(cls, variant_name)\n");
-        generated_code.push_str("                    # Check if it's a class with fromDict method\n");
-        generated_code.push_str("                    if inspect.isclass(variant_class) and hasattr(variant_class, 'fromDict'):\n");
-        generated_code.push_str("                        # Strip the type field before passing to fromDict\n");
-        generated_code.push_str("                        variant_data = {k: v for k, v in data.items() if k != \"type\"}\n");
-        generated_code.push_str("                        return variant_class.fromDict(variant_data)\n");
-        generated_code.push_str("                    return variant_class  # Return the string constant\n");
+        generated_code.push_str(&format!("            if \"{}\" in data:\n", serde_tag));
+        generated_code.push_str(&format!("                tagged_variant_name = data[\"{}\"]\n", serde_tag));
+        generated_code.push_str("                # Find the original variant name corresponding to the tagged name\n");
+        // Find the original variant name based on the potentially renamed tagged name
+        for v in e.variants.iter().filter(|v| !matches!(v.fields, syn::Fields::Unit)) {
+             let original_name = v.ident.to_string();
+             let renamed = apply_rename_rule(&original_name, rename_all_rule);
+             generated_code.push_str(&format!("                if tagged_variant_name == \"{}\":\n                    variant_name = \"{}\"\n", renamed, original_name));
+        }
+        generated_code.push_str("                else:\n                    variant_name = None # Variant name not found
+");
+        generated_code.push_str("                if variant_name is not None:\n");
+        generated_code.push_str(&format!("                    if hasattr({}, variant_name):\n", enum_name));
+        generated_code.push_str(&format!("                        variant_class = getattr({}, variant_name)\n", enum_name));
+        generated_code.push_str("                        # Check if it's a class with fromDict method\n");
+        generated_code.push_str("                        if inspect.isclass(variant_class) and hasattr(variant_class, 'fromDict'):\n");
+        generated_code.push_str(&format!("                            # Strip the tag field ('{}') before passing to fromDict\n", serde_tag));
+        generated_code.push_str(&format!("                            variant_data = {{k: v for k, v in data.items() if k != \"{}\"}}\n", serde_tag));
+        generated_code.push_str("                            return variant_class.fromDict(variant_data)\n");
+        generated_code.push_str("                        return variant_class  # Should be a simple string constant if not a dataclass
+");
         generated_code.push_str("        # Default fallback - return None for unknown type\n");
         generated_code.push_str("        return None\n");
         
         // Add helper factory method (renamed from create_*)
-        generated_code.push_str("\n    @classmethod\n    def create(cls, variant_name: str, **kwargs):\n");
+        generated_code.push_str("\n    @staticmethod\n    def create(variant_name: str, **kwargs):\n");
         generated_code.push_str("        \"\"\"Factory method to create a variant instance with fields\"\"\"\n");
-        generated_code.push_str("        if hasattr(cls, variant_name):\n");
-        generated_code.push_str("            variant_class = getattr(cls, variant_name)\n");
+        generated_code.push_str(&format!("        if hasattr({}, variant_name):\n", enum_name));
+        generated_code.push_str(&format!("            variant_class = getattr({}, variant_name)\n", enum_name));
         generated_code.push_str("            if inspect.isclass(variant_class):  # Only call complex variants (classes)\n");
         generated_code.push_str("                return variant_class(**kwargs)\n");
         generated_code.push_str("            return variant_class  # Return the string constant\n");
@@ -1122,19 +1203,40 @@ fn py_enum_def(e: &syn::ItemEnum) -> Result<DerivedPy> {
             enum_name, enum_name, variants_code));
         
         // Add fromJSON method for simple namespace
-        generated_code.push_str("\n    @classmethod\n");
-        generated_code.push_str("    def fromJSON(cls, json_str):\n");
-        generated_code.push_str("        \"\"\"Deserialize JSON string to a variant constant\"\"\"\n");
+        generated_code.push_str("\n    @staticmethod\n");
+        generated_code.push_str("    def fromJSON(json_str):\n");
+        generated_code.push_str(&format!("        \"\"\"Deserialize JSON string using the '{}' tag if it's a dict, otherwise compare string directly\"\"\"\n", serde_tag));
         generated_code.push_str("        data = json.loads(json_str)\n");
         generated_code.push_str("        if isinstance(data, str):\n");
-        generated_code.push_str("            # Return the string constant if it exists\n");
-        generated_code.push_str("            if hasattr(cls, data):\n");
-        generated_code.push_str("                return getattr(cls, data)\n");
+        generated_code.push_str("            # Return the string constant if it exists (compare original and renamed)\n");
+        // Generate checks for both original and renamed simple variants
+        for v in e.variants.iter().filter(|v| matches!(v.fields, syn::Fields::Unit)) {
+            let original_name = v.ident.to_string();
+            let renamed = apply_rename_rule(&original_name, rename_all_rule);
+            if original_name == renamed {
+                 generated_code.push_str(&format!("            if data == \"{}\":\n                return getattr({}, data)\n", 
+                    original_name, enum_name));
+            } else {
+                 generated_code.push_str(&format!("            if data == \"{}\" or data == \"{}\":\n                return getattr({}, \"{}\")\n", 
+                    original_name, renamed, enum_name, original_name));
+            }
+        }
         generated_code.push_str("            return data  # Unknown string value\n");
-        generated_code.push_str("        elif isinstance(data, dict) and \"type\" in data:\n");
-        generated_code.push_str("            variant_name = data[\"type\"]\n");
-        generated_code.push_str("            if hasattr(cls, variant_name):\n");
-        generated_code.push_str("                return getattr(cls, variant_name)\n");
+        generated_code.push_str(&format!("        elif isinstance(data, dict) and \"{}\" in data:\n", serde_tag));
+        generated_code.push_str(&format!("            variant_name_tagged = data[\"{}\"]\n", serde_tag));
+        generated_code.push_str("            # Check if tagged name matches any variant (original or renamed)\n");
+        // Generate checks for both original and renamed simple variants based on tag
+        for v in e.variants.iter().filter(|v| matches!(v.fields, syn::Fields::Unit)) {
+            let original_name = v.ident.to_string();
+            let renamed = apply_rename_rule(&original_name, rename_all_rule);
+            if original_name == renamed {
+                generated_code.push_str(&format!("            if variant_name_tagged == \"{}\":\n                return getattr({}, \"{}\")\n", 
+                    renamed, enum_name, original_name));
+            } else {
+                generated_code.push_str(&format!("            if variant_name_tagged == \"{}\" or variant_name_tagged == \"{}\":\n                return getattr({}, \"{}\")\n", 
+                    original_name, renamed, enum_name, original_name));
+            }
+        }
         generated_code.push_str("        # Default fallback - return None for unknown type\n");
         generated_code.push_str("        return None\n");
     }

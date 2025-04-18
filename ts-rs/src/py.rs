@@ -1,7 +1,6 @@
 use std::{
     any::TypeId,
     path::{Path, PathBuf},
-    collections::HashSet, // Add HashSet import
 };
 
 pub use crate::export::ExportError;
@@ -230,7 +229,7 @@ pub trait Py {
             .ok_or_else(std::any::type_name::<Self>)
             .map_err(ExportError::CannotBeExported)?;
 
-        export_to::<Self, _>(path)
+        export_to::<Self, _>(&path)
     }
 
     /// Manually export this type to the filesystem, together with all of its dependencies.  
@@ -606,89 +605,85 @@ fn export_all_into<T: Py + ?Sized + 'static>(
     
     // Track types we've already exported
     let mut seen = HashSet::new();
-    export_recursive::<T>(&mut seen, out_dir)
+    export_recursive::<T>(&mut seen, out_dir, 0)
 }
+
+const MAX_RECURSION_DEPTH: usize = 50; // Limit recursion depth
 
 /// Recursively export a type and its dependencies
 fn export_recursive<T: Py + ?Sized + 'static>(
-    seen: &mut std::collections::HashSet<TypeId>, // Use `seen` again
-    out_dir: impl AsRef<Path>,                // Use `impl AsRef<Path>` again
+    seen: &mut std::collections::HashSet<TypeId>,
+    out_dir: impl AsRef<Path>,
+    depth: usize, // Add depth parameter
 ) -> Result<(), ExportError> {
     let type_id = TypeId::of::<T>();
+    let type_name_log = std::any::type_name::<T>(); // Use full type name for logging
 
-    // *** ADD CHECK FOR STANDARD TYPES HERE ***
-    let type_ident = T::ident();
-    // Add explicit type annotation for the HashSet
-    let standard_types: std::collections::HashSet<&str> = [
-        "Any", "Optional", "List", "Dict", "Union", // Typing module
-        "int", "float", "bool", "str", "bytes", "None", // Python built-ins
-        "Path", // From pathlib
-        "Uuid", "NaiveDateTime", // Handled primitives
-        "Dummy", // Internal dummy type
-    ].iter().cloned().collect();
+    // Indent based on depth for readability
+    let indent = "  ".repeat(depth);
 
-    if standard_types.contains(type_ident.as_str()) {
-        // Don't try to export built-in or standard types
-        return Ok(());
+    println!("{}[{}] Entering export_recursive for: {}", indent, depth, type_name_log);
+
+    // Check recursion depth
+    if depth > MAX_RECURSION_DEPTH {
+        println!("{}[{}] Max recursion depth ({}) exceeded for {}! Aborting this branch.", indent, depth, MAX_RECURSION_DEPTH, type_name_log);
+        // Return Ok to prevent cascading errors, but log the issue.
+        // Consider returning a specific error if needed: Err(ExportError::RecursionLimitExceeded)
+        return Ok(()); 
     }
-    // *** END CHECK ***
 
-    // Use `seen` here
     if !seen.insert(type_id) {
-        // Already visited or currently visiting (cycle detected)
+        println!("{}[{}] Already seen {}, skipping.", indent, depth, type_name_log);
         return Ok(());
     }
     
-    let out_dir = out_dir.as_ref(); // Ensure we have a &Path inside the function
+    let out_dir = out_dir.as_ref();
     
-    // First, export the current type
-    let type_name = T::ident();
+    // First, export the current type if it's exportable
+    let type_ident = T::ident(); // Use ident for file path logic
     let file_path = match T::output_path() {
         Some(path) => Some(out_dir.join(path)),
-        None => {
-            // Skip primitive types
-            if T::name() == "int" || T::name() == "str" || T::name() == "bool" || T::name() == "float" {
-                // Skip primitives, but continue with dependency traversal
-                None
-            } else {
-                // Create a default path for this type
-                let default_path = format!("{}.py", type_name);
-                Some(out_dir.join(default_path))
-            }
-        }
+        None => T::default_output_path(),
     };
     
     if let Some(path) = file_path {
-        export_to::<T, _>(path)?;
+        println!("{}[{}] Attempting export for {} to {}", indent, depth, type_ident, path.display());
+        export_to::<T, _>(&path)?;
+        println!("{}[{}] Successfully exported {} to {}", indent, depth, type_ident, path.display());
+    } else {
+        println!("{}[{}] Skipping direct export for {} (not marked or primitive/container)", indent, depth, type_ident);
     }
     
-    // Get all dependencies of this type after exporting the current type
-    // This will include dependencies that were populated by the macro implementation
-    let deps = <T as crate::Py>::dependencies();
-    
-    // Debug: Print the dependencies we found for this type
-    println!("Dependencies for {}: {} dependencies found", type_name, deps.len());
-    for dep in &deps {
-        println!("  - Dependency: {} -> {}", dep.py_name, dep.output_path.display());
-    }
+    // IMPORTANT: Always visit dependencies, even if the current type wasn't directly exported.
+    println!("{}[{}] Visiting dependencies for: {}", indent, depth, type_name_log);
     
     // Visit all dependencies and export them recursively
     struct Visit<'a> {
         seen: &'a mut std::collections::HashSet<TypeId>,
         out_dir: &'a Path,
         error: Option<ExportError>,
+        parent_type_name: &'static str, 
+        depth: usize, // Add depth to Visit
     }
     
     impl PyTypeVisitor for Visit<'_> {
         fn visit<U: Py + 'static + ?Sized>(&mut self) {
-            // If an error occurred previously, return
+            let child_type_name = std::any::type_name::<U>();
+            let indent = "  ".repeat(self.depth + 1); // Indent for child visit log
+            println!("{}[{}] Visiting dependency {} from {}", indent, self.depth + 1, child_type_name, self.parent_type_name);
             if self.error.is_some() {
+                println!("{}[{}] Skipping due to previous error.", indent, self.depth + 1);
                 return;
             }
             
-            // Always recurse into dependencies, even if they don't have #[py(export)] attribute
-            // This ensures all types in the dependency chain get exported
-            self.error = export_recursive::<U>(self.seen, self.out_dir).err();
+            // Recursively call export_recursive for the dependency type U, incrementing depth
+            match export_recursive::<U>(self.seen, self.out_dir, self.depth + 1) {
+                Ok(_) => { /* println!("{}[{}] Successfully processed dependency {}", indent, self.depth + 1, child_type_name); */ } // Reduce success noise
+                Err(e) => {
+                    println!("{}[{}] Error processing dependency {}: {:?}", indent, self.depth + 1, child_type_name, e);
+                    self.error = Some(e);
+                }
+            }
         }
     }
     
@@ -696,13 +691,18 @@ fn export_recursive<T: Py + ?Sized + 'static>(
         seen,
         out_dir,
         error: None,
+        parent_type_name: type_name_log,
+        depth, // Pass current depth to Visit
     };
     
+    // Trigger the recursive calls for all dependencies
     <T as crate::Py>::visit_dependencies(&mut visitor);
     
     if let Some(e) = visitor.error {
+        println!("{}[{}] Exiting export_recursive for {} with error: {:?}", indent, depth, type_name_log, e);
         Err(e)
     } else {
+        println!("{}[{}] Exiting export_recursive for {} successfully.", indent, depth, type_name_log);
         Ok(())
     }
 }

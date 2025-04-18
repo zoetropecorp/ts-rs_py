@@ -62,6 +62,7 @@ pub enum Dependency {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, TS, Py)]
+#[py(export)]
 pub struct TriggerHandler {
     pub id: Uuid,
     pub dependency: Dependency,
